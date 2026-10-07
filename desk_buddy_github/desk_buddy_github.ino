@@ -11,20 +11,26 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+
+#include <FS.h>
+#include <SPI.h>
 #include <TFT_eSPI.h>
+
 #include <time.h>
 #include <ArduinoJson.h>
 #include <WebServer.h>
 #include <Preferences.h>
-#include <SPI.h>
-#include <XPT2046_Touchscreen.h>
 #include <math.h>
 
 // =========================================================
 // WIFI
 // =========================================================
-const char* WIFI_SSID = "YOUR_WIFI_SSID";       // Replace with your WiFi network name
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // Replace with your WiFi password
+// arduino_secrets.h is gitignored and lives only in the sketch folder,
+// so it survives repo copies. Create it with:
+//   const char* WIFI_SSID = "your network name";
+//   const char* WIFI_PASS = "your password";
+//   const char* OTA_PASSWORD = "your OTA password";
+#include "arduino_secrets.h"
 
 // =========================================================
 // DISPLAY / TOUCH
@@ -33,25 +39,6 @@ TFT_eSPI tft;
 
 const int ROT = 2;
 const bool INV = false;
-
-#define TOUCH_CS  33
-#define TOUCH_IRQ 36
-
-static const int T_SCK  = 25;
-static const int T_MISO = 39;
-static const int T_MOSI = 32;
-
-SPIClass touchSPI(VSPI);
-XPT2046_Touchscreen ts(TOUCH_CS);
-
-static const int TOUCH_X_MIN = 562;
-static const int TOUCH_X_MAX = 3604;
-static const int TOUCH_Y_MIN = 544;
-static const int TOUCH_Y_MAX = 3720;
-
-static const bool TOUCH_SWAP_XY = false;
-static const bool TOUCH_FLIP_X  = false;
-static const bool TOUCH_FLIP_Y  = false;
 
 // =========================================================
 // WEB / STORAGE
@@ -68,9 +55,7 @@ TFT_eSprite sprSmall = TFT_eSprite(&tft);
 // =========================================================
 // LOCATION
 // =========================================================
-float LAT = 52.5200f;
-float LNG = 13.4050f;
-String locationName = "Berlin";
+// Default lat/lng/name come from arduino_secrets.h (gitignored, sketch-folder only)
 
 // =========================================================
 // THEME
@@ -89,9 +74,9 @@ const uint16_t COL_RED    = TFT_RED;
 const uint16_t COL_BLUE   = 0x041F;
 
 String textColorKey = "standard";
-String unitKey = "metric"; // metric = C/mm, imperial = F/in
-String regionFormatKey = "europe"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
-String timezoneKey = "europe_central";
+String unitKey = "imperial"; // metric = C/mm, imperial = F/in
+String regionFormatKey = "us"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
+String timezoneKey = "us_eastern";
 
 // =========================================================
 // LAYOUT
@@ -515,10 +500,33 @@ static bool useUsRegionFormat() {
 
 static String formatClockParts(const struct tm& tmValue, bool withSeconds) {
   char buf[20];
-  const char* pattern = useUsRegionFormat()
-    ? (withSeconds ? "%I:%M:%S %p" : "%I:%M %p")
-    : (withSeconds ? "%H:%M:%S" : "%H:%M");
-  strftime(buf, sizeof(buf), pattern, &tmValue);
+
+  if (useUsRegionFormat()) {
+    if (withSeconds) {
+      snprintf(buf, sizeof(buf), "%d:%02d:%02d %s",
+               (tmValue.tm_hour % 12 == 0) ? 12 : tmValue.tm_hour % 12,
+               tmValue.tm_min,
+               tmValue.tm_sec,
+               tmValue.tm_hour >= 12 ? "PM" : "AM");
+    } else {
+      snprintf(buf, sizeof(buf), "%d:%02d %s",
+               (tmValue.tm_hour % 12 == 0) ? 12 : tmValue.tm_hour % 12,
+               tmValue.tm_min,
+               tmValue.tm_hour >= 12 ? "PM" : "AM");
+    }
+  } else {
+    if (withSeconds) {
+      snprintf(buf, sizeof(buf), "%d:%02d:%02d",
+               tmValue.tm_hour,
+               tmValue.tm_min,
+               tmValue.tm_sec);
+    } else {
+      snprintf(buf, sizeof(buf), "%d:%02d",
+               tmValue.tm_hour,
+               tmValue.tm_min);
+    }
+  }
+
   return String(buf);
 }
 
@@ -1043,23 +1051,20 @@ void resetDataCaches() {
 // TOUCH
 // =========================================================
 bool readTouchXY(int& sx, int& sy) {
-  if (!ts.touched()) return false;
+  uint16_t x, y;
 
-  TS_Point p = ts.getPoint();
-  if (p.z < 80 || p.z > 4000) return false;
+  if (!tft.getTouch(&x, &y)) {
+    return false;
+  }
 
-  int x = map(p.x, TOUCH_X_MIN, TOUCH_X_MAX, 0, SCREEN_W);
-  int y = map(p.y, TOUCH_Y_MIN, TOUCH_Y_MAX, 0, SCREEN_H);
+  Serial.print("Touch X: ");
+  Serial.print(x);
+  Serial.print("  Y: ");
+  Serial.println(y);
 
-  x = constrain(x, 0, SCREEN_W - 1);
-  y = constrain(y, 0, SCREEN_H - 1);
+  sx = constrain((int)x, 0, SCREEN_W - 1);
+  sy = constrain((int)y, 0, SCREEN_H - 1);
 
-  if (TOUCH_SWAP_XY) { int tmp = x; x = y; y = tmp; }
-  if (TOUCH_FLIP_X)  x = (SCREEN_W - 1) - x;
-  if (TOUCH_FLIP_Y)  y = (SCREEN_H - 1) - y;
-
-  sx = x;
-  sy = y;
   return true;
 }
 
@@ -2645,13 +2650,10 @@ void setup() {
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Booting Deskbuddy...", 10, 10, 2);
+  tft.drawString("Booting SAKI Deskbuddy...", 10, 10, 2);
 
-  touchSPI.begin(T_SCK, T_MISO, T_MOSI);
-  pinMode(TOUCH_CS, OUTPUT);
-  digitalWrite(TOUCH_CS, HIGH);
-  ts.begin(touchSPI);
-  ts.setRotation(ROT);
+  uint16_t calData[5] = { 294, 3501, 440, 3457, 0 };
+  tft.setTouch(calData);  
 
   tft.drawString("Connecting WiFi...", 10, 34, 2);
   connectWiFi(true);
