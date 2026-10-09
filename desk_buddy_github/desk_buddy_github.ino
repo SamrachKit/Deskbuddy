@@ -22,6 +22,7 @@
 #include <Preferences.h>
 #include <math.h>
 #include "RainValueFont.h"
+#include "WeatherIconsFont.h"
 #define GFXFF 1
 
 // =========================================================
@@ -242,7 +243,7 @@ const char* homeWidgetLabel(HomeWidgetType type) {
     case HOME_WIDGET_OUTDOOR: return "Outdoor";
     case HOME_WIDGET_UV:      return "UV index";
     case HOME_WIDGET_WIND:    return "Wind";
-    case HOME_WIDGET_SUN:     return "Sun event";
+    case HOME_WIDGET_SUN:     return "Sunrise / sunset";
     case HOME_WIDGET_MOON:    return "Moon phase";
     default:                  return "Week";
   }
@@ -454,8 +455,26 @@ static float windSpeedMs = NAN;
 static float windDirectionDeg = NAN;
 static float uvIndex = NAN;
 static float moonPhase = NAN;
+static int weatherCode = -1;
+static int weatherIsDay = -1;
+static const bool WEATHER_ICON_TEST_MODE = false;
+struct WeatherIconTestCase {
+  int code;
+  bool isDay;
+};
+static const WeatherIconTestCase WEATHER_ICON_TEST_CASES[] = {
+  {0, true}, {0, false}, {2, true}, {2, false}, {3, true},
+  {45, true}, {45, false}, {51, true}, {51, false}, {61, true},
+  {61, false}, {56, true}, {66, false}, {71, true}, {71, false},
+  {77, true}, {80, true}, {80, false}, {95, true}, {95, false}, {-1, true}
+};
+static const int WEATHER_ICON_TEST_CASE_COUNT = sizeof(WEATHER_ICON_TEST_CASES) / sizeof(WEATHER_ICON_TEST_CASES[0]);
 static time_t lastWeatherFetch = 0;
 static const uint32_t WEATHER_INTERVAL_SEC = 10 * 60;
+
+static unsigned long weatherIconTestIndex() {
+  return (millis() / 5000UL) % WEATHER_ICON_TEST_CASE_COUNT;
+}
 
 // Sunrise / Sunset
 static int sunriseMin = -1;
@@ -1082,6 +1101,8 @@ void loadStoredSettings() {
 void resetDataCaches() {
   tempC = NAN;
   precipMm = NAN;
+  weatherCode = -1;
+  weatherIsDay = -1;
   windSpeedMs = NAN;
   windDirectionDeg = NAN;
   sunriseMin = -1;
@@ -1225,7 +1246,7 @@ bool fetchWeather() {
 
   String url = String("https://api.open-meteo.com/v1/forecast?latitude=") + String(LAT, 4) +
                "&longitude=" + String(LNG, 4) +
-               "&current=temperature_2m,wind_speed_10m,wind_direction_10m,uv_index" +
+               "&current=temperature_2m,wind_speed_10m,wind_direction_10m,uv_index,weather_code,is_day" +
                "&hourly=precipitation" +
                "&daily=temperature_2m_max,temperature_2m_min,moon_phase" +
                "&past_days=1&forecast_days=2&timezone=auto" +
@@ -1243,6 +1264,8 @@ bool fetchWeather() {
   windSpeedMs = doc["current"]["wind_speed_10m"] | NAN;
   windDirectionDeg = doc["current"]["wind_direction_10m"] | NAN;
   uvIndex = doc["current"]["uv_index"] | NAN;
+  weatherCode = doc["current"]["weather_code"] | -1;
+  weatherIsDay = doc["current"]["is_day"] | -1;
   tempMaxC = NAN;
   tempMinC = NAN;
 
@@ -1286,7 +1309,7 @@ bool fetchWeather() {
 
 void ensureWeather() {
   time_t nowT = time(nullptr);
-  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(precipForecastMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) || isnan(moonPhase) ||
+  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(precipForecastMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) || isnan(moonPhase) || weatherCode < 0 || weatherIsDay < 0 ||
        (nowT - lastWeatherFetch) > WEATHER_INTERVAL_SEC) &&
       WiFi.status() == WL_CONNECTED) {
     if (fetchWeather()) dataDirty = true;
@@ -1455,21 +1478,68 @@ void pushSpriteAndDelete(TFT_eSprite& spr, int x, int y) {
   spr.deleteSprite();
 }
 
-void drawCleanSunIcon(TFT_eSprite& spr, int cx, int cy, uint16_t c) {
-  spr.fillCircle(cx, cy, 4, c);
-  spr.drawLine(cx, cy - 9, cx, cy - 7, c);
-  spr.drawLine(cx, cy + 7, cx, cy + 9, c);
-  spr.drawLine(cx - 9, cy, cx - 7, cy, c);
-  spr.drawLine(cx + 7, cy, cx + 9, cy, c);
-  spr.drawLine(cx - 6, cy - 6, cx - 5, cy - 5, c);
-  spr.drawLine(cx + 5, cy - 5, cx + 6, cy - 6, c);
-  spr.drawLine(cx - 6, cy + 6, cx - 5, cy + 5, c);
-  spr.drawLine(cx + 5, cy + 5, cx + 6, cy + 6, c);
+static char weatherIconGlyph(int code, bool isDay) {
+  if (code == 0 || code == 1) return isDay ? 'A' : 'B';
+  if (code == 2) return isDay ? 'C' : 'D';
+  if (code == 3) return 'E';
+  if (code == 45 || code == 48) return isDay ? 'F' : 'G';
+  if (code >= 51 && code <= 55) return isDay ? 'H' : 'I';
+  if (code == 56 || code == 57 || code == 66 || code == 67) return isDay ? 'L' : 'M';
+  if (code >= 61 && code <= 65) return isDay ? 'J' : 'K';
+  if (code == 77) return 'P';
+  if (code == 71 || code == 73 || code == 75 || code == 85 || code == 86) return isDay ? 'N' : 'O';
+  if (code >= 80 && code <= 82) return isDay ? 'Q' : 'R';
+  if (code == 95 || code == 96 || code == 99) return isDay ? 'S' : 'T';
+  return 'U';
 }
 
-void drawMoonIcon(TFT_eSprite& spr, int cx, int cy, uint16_t c) {
-  spr.fillCircle(cx, cy, 6, c);
-  spr.fillCircle(cx + 4, cy - 2, 6, COL_PANEL);
+static const char* weatherConditionText(int code) {
+  if (code == 0) return "Clear";
+  if (code == 1) return "Mostly clear";
+  if (code == 2) return "Partly cloudy";
+  if (code == 3) return "Overcast";
+  if (code == 45 || code == 48) return "Fog";
+  if (code >= 51 && code <= 55) return "Drizzle";
+  if (code == 56 || code == 57) return "Fz. drizzle";
+  if (code == 61) return "Light rain";
+  if (code == 63) return "Rain";
+  if (code == 65) return "Heavy rain";
+  if (code == 66 || code == 67) return "Fz. rain";
+  if (code == 71 || code == 73) return "Snow";
+  if (code == 75) return "Heavy snow";
+  if (code == 77) return "Snow grains";
+  if (code == 80 || code == 81) return "Showers";
+  if (code == 82) return "Heavy showers";
+  if (code == 85) return "Snow showers";
+  if (code == 86) return "Heavy snow";
+  if (code == 95) return "Thunderstorm";
+  if (code == 96 || code == 99) return "Storm + hail";
+  return "Unknown";
+}
+
+static uint16_t blendWeatherIconColor(uint16_t background, uint16_t foreground, uint8_t alpha) {
+  uint16_t inverseAlpha = 255 - alpha;
+  uint8_t red = (((background >> 11) & 0x1F) * inverseAlpha + ((foreground >> 11) & 0x1F) * alpha + 127) / 255;
+  uint8_t green = (((background >> 5) & 0x3F) * inverseAlpha + ((foreground >> 5) & 0x3F) * alpha + 127) / 255;
+  uint8_t blue = ((background & 0x1F) * inverseAlpha + (foreground & 0x1F) * alpha + 127) / 255;
+  return ((uint16_t)red << 11) | ((uint16_t)green << 5) | blue;
+}
+
+static void drawWeatherIcon(TFT_eSprite& display, int cx, int cy, int code, bool isDay) {
+  int glyphIndex = weatherIconGlyph(code, isDay) - 'A';
+  uint16_t bitmapOffset = pgm_read_word(&WeatherIconRasters[glyphIndex].offset);
+  uint8_t width = pgm_read_byte(&WeatherIconRasters[glyphIndex].width);
+  uint8_t height = pgm_read_byte(&WeatherIconRasters[glyphIndex].height);
+  int left = cx - width / 2;
+  int top = cy - height / 2;
+
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      uint8_t alpha = pgm_read_byte(&WeatherIconRasterAlpha[bitmapOffset + y * width + x]);
+      if (alpha == 0) continue;
+      display.drawPixel(left + x, top + y, blendWeatherIconColor(COL_PANEL, COL_TEXT, alpha));
+    }
+  }
 }
 
 // Renders the moon disc from the API phase fraction (0 = new, 0.5 = full).
@@ -1515,11 +1585,11 @@ void drawClockCardSprite(bool force = false) {
 
   String timeBuf = formatClockParts(tmNow, true);
   String dateBuf = formatDateParts(tmNow);
+  unsigned long iconTestIndex = weatherIconTestIndex();
+  int iconCode = WEATHER_ICON_TEST_MODE ? WEATHER_ICON_TEST_CASES[iconTestIndex].code : weatherCode;
+  bool iconIsDay = WEATHER_ICON_TEST_MODE ? WEATHER_ICON_TEST_CASES[iconTestIndex].isDay : weatherIsDay == 1;
 
-  String sr = formatMinuteOfDay(sunriseMin);
-  String ss = formatMinuteOfDay(sunsetMin);
-
-  String combined = timeBuf + "|" + dateBuf + "|" + sr + "|" + ss + "|" +
+  String combined = timeBuf + "|" + dateBuf + "|" + String(iconCode) + "|" + String(iconIsDay ? 1 : 0) + "|" +
                     String(COL_ACCENT) + "|" + String(COL_TEXT);
 
   if (!force && combined == cacheClock) return;
@@ -1546,12 +1616,11 @@ void drawClockCardSprite(bool force = false) {
   sprClock.setTextColor(COL_DIM, COL_PANEL);
   sprClock.drawString(dateBuf, 10, 45, 2);
 
-  drawCleanSunIcon(sprClock, 151, 22, COL_ACCENT);
-  drawMoonIcon(sprClock, 151, 50, COL_ACCENT);
-
-  sprClock.setTextColor(COL_ACCENT, COL_PANEL);
-  sprClock.drawString(sr, 165, 15, 2);
-  sprClock.drawString(ss, 165, 43, 2);
+  drawWeatherIcon(sprClock, 178, 34 - HOME_WIDGET_H / 10, iconCode, iconIsDay);
+  sprClock.setTextDatum(MC_DATUM);
+  sprClock.setTextColor(COL_DIM, COL_PANEL);
+  sprClock.drawString(weatherConditionText(iconCode), 178, HOME_WIDGET_H - 10, 1);
+  sprClock.setTextDatum(TL_DATUM);
 
   pushSpriteAndDelete(sprClock, x, y);
 }
@@ -1644,9 +1713,9 @@ void drawRainCombinedWidget(int x, int y, int w, int h, String& cache, bool forc
 }
 
 void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = false) {
-  String label = nextSunLabel();
-  String value = nextSunTimeText();
-  String combined = label + "|" + value + "|" + String(COL_PANEL) + "|" +
+  String sunrise = formatMinuteOfDay(sunriseMin);
+  String sunset = formatMinuteOfDay(sunsetMin);
+  String combined = sunrise + "|" + sunset + "|" + String(COL_PANEL) + "|" +
                     String(COL_STROKE) + "|" + String(COL_TEXT) + "|" + String(COL_ACCENT);
 
   if (!force && combined == cache) return;
@@ -1656,21 +1725,14 @@ void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = 
 
   sprSmall.setTextDatum(TL_DATUM);
   sprSmall.setTextColor(COL_DIM, COL_PANEL);
-  sprSmall.drawString(label, 10, 8, 2);
+  sprSmall.drawString("Sun", 10, 8, 2);
 
+  sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
+  sprSmall.drawString("Rise", 10, 29, 1);
+  sprSmall.drawString("Set", 10, 48, 1);
   sprSmall.setTextColor(COL_TEXT, COL_PANEL);
-  if (useUsRegionFormat()) {
-    int splitAt = value.lastIndexOf(' ');
-    String mainValue = splitAt > 0 ? value.substring(0, splitAt) : value;
-    String suffix = splitAt > 0 ? value.substring(splitAt + 1) : "";
-    sprSmall.drawString(mainValue, 10, 30, 4);
-    if (suffix.length() > 0) {
-      int suffixX = 10 + sprSmall.textWidth(mainValue, 4) + 3;
-      sprSmall.drawString(suffix, suffixX, 35, 2);
-    }
-  } else {
-    sprSmall.drawString(value, 10, 30, 4);
-  }
+  sprSmall.drawString(sunrise, 42, 25, 2);
+  sprSmall.drawString(sunset, 42, 44, 2);
 
   pushSpriteAndDelete(sprSmall, x, y);
 }
