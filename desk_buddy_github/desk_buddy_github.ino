@@ -21,6 +21,14 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <math.h>
+#include "RainValueFont.h"
+#define GFXFF 1
+
+// =========================================================
+// FORWARD DECLARATIONS
+// =========================================================
+void setBacklight(int value);
+void setWifiEnabled(bool enabled);
 
 // =========================================================
 // WIFI
@@ -38,7 +46,6 @@
 TFT_eSPI tft;
 
 const int ROT = 2;
-const bool INV = false;
 
 // =========================================================
 // WEB / STORAGE
@@ -73,6 +80,8 @@ const uint16_t COL_YELLOW = 0xFFE0;
 const uint16_t COL_RED    = TFT_RED;
 const uint16_t COL_BLUE   = 0x041F;
 
+String accentKey = "cyan";
+String bgKey = "slate";
 String textColorKey = "standard";
 String unitKey = "imperial"; // metric = C/mm, imperial = F/in
 String regionFormatKey = "us"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
@@ -108,28 +117,56 @@ const int PAGE_ROW3_Y = 198;
 const int PAGE_WIDGET_H = HOME_WIDGET_H;
 
 // =========================================================
-// NOTES
+// RADAR (ADS-B plane radar, via adsb.fi)
 // =========================================================
-String notesText = "No notes yet.";
-bool notesDirty = true;
+struct RadarAircraft {
+  float lat;
+  float lon;
+  float trackDeg;
+  bool hasTrack;
+  String callsign;
+  String altText;
+};
+
+const int RADAR_MAX_AIRCRAFT = 20;
+RadarAircraft radarAircraft[RADAR_MAX_AIRCRAFT];
+int radarAircraftCount = 0;
+
+struct RadarRangePreset { float km; };
+const RadarRangePreset RADAR_RANGES[] = { {5.0f}, {10.0f}, {15.0f}, {25.0f} };
+const int RADAR_RANGE_COUNT = 4;
+int radarRangeIndex = 1;
+
+const int RADAR_CX = 120;
+const int RADAR_CY = 155;
+const int RADAR_OUTER_R = 88;
+const int RADAR_RING_COUNT = 3;
+
+volatile unsigned long lastRadarFetch = 0;
+const unsigned long RADAR_FETCH_INTERVAL_MS = 8000UL;
+volatile bool radarDirty = true;
+SemaphoreHandle_t radarDataMutex = nullptr;
+volatile bool radarFetchInProgress = false;
+volatile bool radarDataLoaded = false;
+
 String buddyNickname = "";
 
 enum HomeWidgetType {
   HOME_WIDGET_WEEK = 0,
   HOME_WIDGET_TIMER,
-  HOME_WIDGET_RAIN,
+  HOME_WIDGET_RAIN_COMBINED,
   HOME_WIDGET_OUTDOOR,
-  HOME_WIDGET_KP,
   HOME_WIDGET_UV,
   HOME_WIDGET_WIND,
-  HOME_WIDGET_SUN
+  HOME_WIDGET_SUN,
+  HOME_WIDGET_MOON
 };
 
 const int HOME_SLOT_COUNT = 4;
 HomeWidgetType homeWidgetSlots[HOME_SLOT_COUNT] = {
   HOME_WIDGET_WEEK,
   HOME_WIDGET_TIMER,
-  HOME_WIDGET_RAIN,
+  HOME_WIDGET_RAIN_COMBINED,
   HOME_WIDGET_OUTDOOR
 };
 
@@ -141,7 +178,7 @@ String cacheHomeSlots[HOME_SLOT_COUNT];
 enum Page {
   PAGE_HOME = 0,
   PAGE_WEATHER = 1,
-  PAGE_NOTES = 2,
+  PAGE_RADAR = 2,
   PAGE_STATUS = 3
 };
 
@@ -159,9 +196,6 @@ bool dataDirty = true;
 
 // cache
 String cacheClock = "";
-String cacheTemp = "";
-String cacheRain = "";
-String cacheWeek = "";
 String cacheHomeEmpty1 = "";
 String cacheHomeEmpty2 = "";
 String cacheFocusTimer = "";
@@ -175,28 +209,27 @@ String lastSignalText = "";
 String lastIpText = "";
 String lastUptimeText = "";
 String lastTempText = "";
-String lastRainText = "";
+String cacheWeatherRain = "";
 String lastUvText = "";
 String lastUvLevelText = "";
-String lastKpText = "";
-String lastKpLevelText = "";
+String lastMoonText = "";
+String lastMoonLevelText = "";
 String lastWindText = "";
 String lastWindDirText = "";
 String lastNextSunLabel = "";
 String lastNextSunTime = "";
-String lastNotesText = "";
 String lastNetworkToggleText = "";
 
 const char* homeWidgetKey(HomeWidgetType type) {
   switch (type) {
     case HOME_WIDGET_WEEK:    return "week";
     case HOME_WIDGET_TIMER:   return "timer";
-    case HOME_WIDGET_RAIN:    return "rain";
+    case HOME_WIDGET_RAIN_COMBINED: return "raincombined";
     case HOME_WIDGET_OUTDOOR: return "outdoor";
-    case HOME_WIDGET_KP:      return "kp";
     case HOME_WIDGET_UV:      return "uv";
     case HOME_WIDGET_WIND:    return "wind";
     case HOME_WIDGET_SUN:     return "sun";
+    case HOME_WIDGET_MOON:    return "moon";
     default:                  return "week";
   }
 }
@@ -205,12 +238,12 @@ const char* homeWidgetLabel(HomeWidgetType type) {
   switch (type) {
     case HOME_WIDGET_WEEK:    return "Week";
     case HOME_WIDGET_TIMER:   return "Timer";
-    case HOME_WIDGET_RAIN:    return "Rain";
+    case HOME_WIDGET_RAIN_COMBINED: return "Rain (past+forecast)";
     case HOME_WIDGET_OUTDOOR: return "Outdoor";
-    case HOME_WIDGET_KP:      return "KP index";
     case HOME_WIDGET_UV:      return "UV index";
     case HOME_WIDGET_WIND:    return "Wind";
     case HOME_WIDGET_SUN:     return "Sun event";
+    case HOME_WIDGET_MOON:    return "Moon phase";
     default:                  return "Week";
   }
 }
@@ -218,12 +251,12 @@ const char* homeWidgetLabel(HomeWidgetType type) {
 HomeWidgetType homeWidgetFromKey(const String& key) {
   if (key == "week") return HOME_WIDGET_WEEK;
   if (key == "timer") return HOME_WIDGET_TIMER;
-  if (key == "rain") return HOME_WIDGET_RAIN;
+  if (key == "raincombined") return HOME_WIDGET_RAIN_COMBINED;
   if (key == "outdoor") return HOME_WIDGET_OUTDOOR;
-  if (key == "kp") return HOME_WIDGET_KP;
   if (key == "uv") return HOME_WIDGET_UV;
   if (key == "wind") return HOME_WIDGET_WIND;
   if (key == "sun") return HOME_WIDGET_SUN;
+  if (key == "moon") return HOME_WIDGET_MOON;
   return HOME_WIDGET_WEEK;
 }
 
@@ -368,12 +401,12 @@ void appendHomeWidgetOptions(String& page, const String& selectedKey) {
   const HomeWidgetType types[] = {
     HOME_WIDGET_WEEK,
     HOME_WIDGET_TIMER,
-    HOME_WIDGET_RAIN,
+    HOME_WIDGET_RAIN_COMBINED,
     HOME_WIDGET_OUTDOOR,
-    HOME_WIDGET_KP,
     HOME_WIDGET_UV,
     HOME_WIDGET_WIND,
-    HOME_WIDGET_SUN
+    HOME_WIDGET_SUN,
+    HOME_WIDGET_MOON
   };
 
   for (HomeWidgetType type : types) {
@@ -416,16 +449,13 @@ static float tempC = NAN;
 static float tempMinC = NAN;
 static float tempMaxC = NAN;
 static float precipMm = NAN;
+static float precipForecastMm = NAN;
 static float windSpeedMs = NAN;
 static float windDirectionDeg = NAN;
 static float uvIndex = NAN;
+static float moonPhase = NAN;
 static time_t lastWeatherFetch = 0;
 static const uint32_t WEATHER_INTERVAL_SEC = 10 * 60;
-
-// KP-index
-static float kpIndex = NAN;
-static time_t lastKpFetch = 0;
-static const uint32_t KP_INTERVAL_SEC = 10 * 60;
 
 // Sunrise / Sunset
 static int sunriseMin = -1;
@@ -436,7 +466,7 @@ static time_t lastSyncTime = 0;
 // =========================================================
 // SLEEP / BACKLIGHT
 // =========================================================
-const int BACKLIGHT_PIN = 21;
+const int BACKLIGHT_PIN = 27;
 
 bool sleepDimmed = false;
 bool sleepOff = false;
@@ -447,7 +477,7 @@ unsigned long lastInteractionMs = 0;
 int sleepIntervalMin = 10;
 int sleepOffDelaySec = 60;
 
-const int BL_FULL = 255;
+const int BL_FULL = 230;
 const int BL_DIM  = 18;
 const int BL_OFF  = 0;
 const int FLASH_BL_LOW = 20;
@@ -554,24 +584,12 @@ static String formatMinuteOfDay(int minOfDay) {
 
 static String tempText() {
   if (isnan(tempC)) return unitKey == "imperial" ? "--.-F" : "--.-C";
-
-  if (unitKey == "imperial") {
-    float f = tempC * 9.0f / 5.0f + 32.0f;
-    return String(f, 1) + "F";
-  }
-
-  return String(tempC, 1) + "C";
+  return String(tempC, 1) + (unitKey == "imperial" ? "F" : "C");
 }
 
 static String formatDisplayTemp(float value) {
   if (isnan(value)) return "--";
-
-  if (unitKey == "imperial") {
-    float f = value * 9.0f / 5.0f + 32.0f;
-    return String((int)roundf(f)) + "F";
-  }
-
-  return String((int)roundf(value)) + "C";
+  return String((int)roundf(value)) + (unitKey == "imperial" ? "F" : "C");
 }
 
 static String tempRangeText() {
@@ -580,24 +598,17 @@ static String tempRangeText() {
 
 static String rainText() {
   if (isnan(precipMm)) return unitKey == "imperial" ? "--.--in" : "--.-mm";
+  return unitKey == "imperial" ? String(precipMm, 2) + "in" : String(precipMm, 1) + "mm";
+}
 
-  if (unitKey == "imperial") {
-    float inches = precipMm / 25.4f;
-    return String(inches, 2) + "in";
-  }
-
-  return String(precipMm, 1) + "mm";
+static String rainForecastText() {
+  if (isnan(precipForecastMm)) return unitKey == "imperial" ? "--.--in" : "--.-mm";
+  return unitKey == "imperial" ? String(precipForecastMm, 2) + "in" : String(precipForecastMm, 1) + "mm";
 }
 
 static String windText() {
   if (isnan(windSpeedMs)) return unitKey == "imperial" ? "--.-mph" : "--.-m/s";
-
-  if (unitKey == "imperial") {
-    float mph = windSpeedMs * 2.236936f;
-    return String(mph, 1) + "mph";
-  }
-
-  return String(windSpeedMs, 1) + "m/s";
+  return unitKey == "imperial" ? String(windSpeedMs, 1) + "mph" : String(windSpeedMs, 1) + "m/s";
 }
 
 static String windDirectionText() {
@@ -606,18 +617,6 @@ static String windDirectionText() {
   const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   int idx = (int)roundf(windDirectionDeg / 45.0f) % 8;
   return String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + "deg";
-}
-
-static String kpText() {
-  return isnan(kpIndex) ? "Kp --" : "Kp " + String(kpIndex, 1);
-}
-
-static String kpLevelText() {
-  if (isnan(kpIndex)) return "--";
-  if (kpIndex < 3.0f) return "Low";
-  if (kpIndex < 5.0f) return "Medium";
-  if (kpIndex < 7.0f) return "High";
-  return "Extreme";
 }
 
 static String uvText() {
@@ -631,6 +630,30 @@ static String uvLevelText() {
   if (uvIndex < 8.0f) return "High";
   if (uvIndex < 11.0f) return "Very High";
   return "Extreme";
+}
+
+static String moonPhaseText() {
+  if (isnan(moonPhase)) return "--%";
+
+  const float phase = constrain(moonPhase, 0.0f, 1.0f);
+  // Convert lunar phase cycle to phase angle.
+  const float angle = 2.0f * PI * phase;
+  // Approximate illuminated fraction.
+  const float illumination = (1.0f - cosf(angle)) * 0.5f;
+  return String((int)roundf(illumination * 100.0f)) + "%";
+}
+
+static String moonPhaseLabelText() {
+  if (isnan(moonPhase)) return "--";
+  float phase = constrain(moonPhase, 0.0f, 1.0f);
+  if (phase < 0.02f || phase >= 0.98f) return "New Moon";
+  if (fabsf(phase - 0.25f) < 0.02f) return "First Quarter";
+  if (fabsf(phase - 0.50f) < 0.02f) return "Full Moon";
+  if (fabsf(phase - 0.75f) < 0.02f) return "Last Quarter";
+  if (phase < 0.25f) return "Wax Crescent";
+  if (phase < 0.50f) return "Wax Gibbous";
+  if (phase < 0.75f) return "Wane Gibbous";
+  return "Wane Crescent";
 }
 
 static uint16_t statusColor() {
@@ -719,6 +742,29 @@ static String themePreviewCss(const String& key) {
   if (key == "garnet")   return cssColorFrom565(0x1004);
   if (key == "ochre")    return cssColorFrom565(0x20E1);
   return cssColorFrom565(0x08A3);
+}
+
+static const char* const ACCENT_KEYS[] = {
+  "standard", "ice", "white", "cyan", "mint", "green",
+  "blue", "purple", "pink", "orange", "amber", "red"
+};
+static const int ACCENT_KEY_COUNT = sizeof(ACCENT_KEYS) / sizeof(ACCENT_KEYS[0]);
+
+static const char* const BG_KEYS[] = {
+  "slate", "deep", "nordic", "forest", "coffee", "soft",
+  "midnight", "graphite", "garnet", "ochre"
+};
+static const int BG_KEY_COUNT = sizeof(BG_KEYS) / sizeof(BG_KEYS[0]);
+
+static void appendColorSwatches(String& page, const char* fieldName, const String& currentValue,
+                                 const char* const* keys, int keyCount, String (*previewFn)(const String&)) {
+  for (int i = 0; i < keyCount; i++) {
+    String key = keys[i];
+    bool isActive = (currentValue == key);
+    page += "<label class='swatch" + String(isActive ? " active" : "") + "' style='background:" + previewFn(key) +
+            ";'><input type='radio' name='" + String(fieldName) + "' value='" + key + "'" +
+            String(isActive ? " checked" : "") + "></label>";
+  }
 }
 
 static String formatTimerClock(unsigned long totalSec) {
@@ -921,40 +967,40 @@ void handleAutoSleep() {
 // =========================================================
 // THEME / SETTINGS
 // =========================================================
-void applyThemeByKey(const String& accentKey, const String& bgKey) {
-  if (accentKey == "standard")    COL_ACCENT = 0xEF7D;
-  else if (accentKey == "cyan")   COL_ACCENT = 0x5EFA;
-  else if (accentKey == "ice")    COL_ACCENT = 0xEFFF;
-  else if (accentKey == "white")  COL_ACCENT = TFT_WHITE;
-  else if (accentKey == "mint")   COL_ACCENT = 0x07F0;
-  else if (accentKey == "green")  COL_ACCENT = TFT_GREEN;
-  else if (accentKey == "blue")   COL_ACCENT = 0x3D9F;
-  else if (accentKey == "purple") COL_ACCENT = 0xA2F5;
-  else if (accentKey == "pink")   COL_ACCENT = 0xF97F;
-  else if (accentKey == "orange") COL_ACCENT = 0xFD20;
-  else if (accentKey == "amber")  COL_ACCENT = 0xFEA0;
-  else if (accentKey == "red")    COL_ACCENT = TFT_RED;
-  else                            COL_ACCENT = 0x5EFA;
+void applyThemeByKey(const String& newAccentKey, const String& newBgKey) {
+  if (newAccentKey == "standard")    COL_ACCENT = 0xEF7D;
+  else if (newAccentKey == "cyan")   COL_ACCENT = 0x5EFA;
+  else if (newAccentKey == "ice")    COL_ACCENT = 0xEFFF;
+  else if (newAccentKey == "white")  COL_ACCENT = TFT_WHITE;
+  else if (newAccentKey == "mint")   COL_ACCENT = 0x07F0;
+  else if (newAccentKey == "green")  COL_ACCENT = TFT_GREEN;
+  else if (newAccentKey == "blue")   COL_ACCENT = 0x3D9F;
+  else if (newAccentKey == "purple") COL_ACCENT = 0xA2F5;
+  else if (newAccentKey == "pink")   COL_ACCENT = 0xF97F;
+  else if (newAccentKey == "orange") COL_ACCENT = 0xFD20;
+  else if (newAccentKey == "amber")  COL_ACCENT = 0xFEA0;
+  else if (newAccentKey == "red")    COL_ACCENT = TFT_RED;
+  else                                COL_ACCENT = 0x5EFA;
 
-  if (bgKey == "slate") {
+  if (newBgKey == "slate") {
     COL_BG = 0x08A3; COL_PANEL = 0x1106; COL_PANEL_ALT = 0x18C7; COL_STROKE = 0x31EC;
-  } else if (bgKey == "deep") {
+  } else if (newBgKey == "deep") {
     COL_BG = 0x0000; COL_PANEL = 0x0841; COL_PANEL_ALT = 0x1082; COL_STROKE = 0x2945;
-  } else if (bgKey == "nordic") {
+  } else if (newBgKey == "nordic") {
     COL_BG = 0x0864; COL_PANEL = 0x10C6; COL_PANEL_ALT = 0x1908; COL_STROKE = 0x3A2D;
-  } else if (bgKey == "forest") {
+  } else if (newBgKey == "forest") {
     COL_BG = 0x0208; COL_PANEL = 0x0ACB; COL_PANEL_ALT = 0x134D; COL_STROKE = 0x2D72;
-  } else if (bgKey == "coffee") {
+  } else if (newBgKey == "coffee") {
     COL_BG = 0x18A3; COL_PANEL = 0x2945; COL_PANEL_ALT = 0x39C7; COL_STROKE = 0x5A89;
-  } else if (bgKey == "soft") {
+  } else if (newBgKey == "soft") {
     COL_BG = 0x10A2; COL_PANEL = 0x1924; COL_PANEL_ALT = 0x2145; COL_STROKE = 0x3A49;
-  } else if (bgKey == "midnight") {
+  } else if (newBgKey == "midnight") {
     COL_BG = 0x0008; COL_PANEL = 0x0011; COL_PANEL_ALT = 0x0018; COL_STROKE = 0x3A7F;
-  } else if (bgKey == "graphite") {
+  } else if (newBgKey == "graphite") {
     COL_BG = 0x1082; COL_PANEL = 0x18C3; COL_PANEL_ALT = 0x2104; COL_STROKE = 0x4208;
-  } else if (bgKey == "garnet") {
+  } else if (newBgKey == "garnet") {
     COL_BG = 0x1004; COL_PANEL = 0x1886; COL_PANEL_ALT = 0x20E8; COL_STROKE = 0x41AC;
-  } else if (bgKey == "ochre") {
+  } else if (newBgKey == "ochre") {
     COL_BG = 0x20E1; COL_PANEL = 0x3184; COL_PANEL_ALT = 0x4226; COL_STROKE = 0x632B;
   } else {
     COL_BG = 0x08A3; COL_PANEL = 0x1106; COL_PANEL_ALT = 0x18C7; COL_STROKE = 0x31EC;
@@ -998,19 +1044,20 @@ void applyTextColorByKey(const String& key) {
 void loadStoredSettings() {
   prefs.begin("deskbuddy", false);
 
-  String accent = prefs.getString("accent", "cyan");
-  String bg     = prefs.getString("bg", "slate");
+  accentKey = prefs.getString("accent", accentKey);
+  bgKey     = prefs.getString("bg", bgKey);
   String txt    = prefs.getString("text", "standard");
 
-  notesText        = prefs.getString("notes", "No notes yet.");
+  radarRangeIndex  = prefs.getUChar("radarRange", 1);
+  if (radarRangeIndex >= RADAR_RANGE_COUNT) radarRangeIndex = 1;
   buddyNickname    = prefs.getString("nickname", "");
-  locationName     = prefs.getString("locname", "Berlin");
-  LAT              = prefs.getFloat("lat", 52.5200f);
-  LNG              = prefs.getFloat("lng", 13.4050f);
+  locationName     = prefs.getString("locname", locationName);
+  LAT              = prefs.getFloat("lat", LAT);
+  LNG              = prefs.getFloat("lng", LNG);
   sleepIntervalMin = prefs.getInt("sleepMin", 10);
-  unitKey          = prefs.getString("units", "metric");
-  regionFormatKey  = prefs.getString("region", "europe");
-  timezoneKey      = sanitizeTimezoneKey(prefs.getString("tz", "europe_central"));
+  unitKey          = prefs.getString("units", unitKey);
+  regionFormatKey  = prefs.getString("region", regionFormatKey);
+  timezoneKey      = sanitizeTimezoneKey(prefs.getString("tz", timezoneKey));
   flashModeEnabled = prefs.getBool("flashMode", false);
   wifiEnabled      = prefs.getBool("wifiEnabled", true);
 
@@ -1024,10 +1071,10 @@ void loadStoredSettings() {
     timerPresetMin[i] = sanitizeTimerMinutes(prefs.getInt(key.c_str(), timerPresetMin[i]));
   }
 
-  if (unitKey != "metric" && unitKey != "imperial") unitKey = "metric";
-  if (regionFormatKey != "europe" && regionFormatKey != "us") regionFormatKey = "europe";
+  if (unitKey != "metric" && unitKey != "imperial") unitKey = "imperial";
+  if (regionFormatKey != "europe" && regionFormatKey != "us") regionFormatKey = "us";
   buddyNickname.trim();
-  applyThemeByKey(accent, bg);
+  applyThemeByKey(accentKey, bgKey);
   applyTextColorByKey(txt);
   applyDeviceTimezoneByKey(timezoneKey);
 }
@@ -1037,12 +1084,10 @@ void resetDataCaches() {
   precipMm = NAN;
   windSpeedMs = NAN;
   windDirectionDeg = NAN;
-  kpIndex = NAN;
   sunriseMin = -1;
   sunsetMin = -1;
   lastSunYmd = -1;
   lastWeatherFetch = 0;
-  lastKpFetch = 0;
   dataDirty = true;
   pageDirty = true;
 }
@@ -1056,11 +1101,6 @@ bool readTouchXY(int& sx, int& sy) {
   if (!tft.getTouch(&x, &y)) {
     return false;
   }
-
-  Serial.print("Touch X: ");
-  Serial.print(x);
-  Serial.print("  Y: ");
-  Serial.println(y);
 
   sx = constrain((int)x, 0, SCREEN_W - 1);
   sy = constrain((int)y, 0, SCREEN_H - 1);
@@ -1094,17 +1134,13 @@ bool touchNewPress(int& tx, int& ty) {
 // =========================================================
 // API
 // =========================================================
-bool fetchSunriseSunset() {
-  if (WiFi.status() != WL_CONNECTED) return false;
-
+bool httpsGetBody(const String &url, String &outBody, unsigned long timeoutMs = 0) {
   WiFiClientSecure client;
   client.setInsecure();
 
-  String url = String("https://api.sunrise-sunset.org/json?lat=") + String(LAT, 4) +
-               "&lng=" + String(LNG, 4) + "&formatted=0";
-
   HTTPClient http;
   if (!http.begin(client, url)) return false;
+  if (timeoutMs > 0) http.setTimeout(timeoutMs);
 
   int code = http.GET();
   if (code != 200) {
@@ -1112,8 +1148,19 @@ bool fetchSunriseSunset() {
     return false;
   }
 
-  String body = http.getString();
+  outBody = http.getString();
   http.end();
+  return true;
+}
+
+bool fetchSunriseSunset() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  String url = String("https://api.sunrise-sunset.org/json?lat=") + String(LAT, 4) +
+               "&lng=" + String(LNG, 4) + "&formatted=0";
+
+  String body;
+  if (!httpsGetBody(url, body)) return false;
 
   StaticJsonDocument<1024> doc;
   if (deserializeJson(doc, body)) return false;
@@ -1172,29 +1219,24 @@ void ensureSunTimesForToday() {
 bool fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  String windUnitParam = unitKey == "imperial" ? "mph" : "ms";
+  String tempUnitParam = unitKey == "imperial" ? "fahrenheit" : "celsius";
+  String precipUnitParam = unitKey == "imperial" ? "inch" : "mm";
 
   String url = String("https://api.open-meteo.com/v1/forecast?latitude=") + String(LAT, 4) +
                "&longitude=" + String(LNG, 4) +
                "&current=temperature_2m,wind_speed_10m,wind_direction_10m,uv_index" +
                "&hourly=precipitation" +
-               "&daily=temperature_2m_max,temperature_2m_min" +
-               "&forecast_days=1&timezone=auto&wind_speed_unit=ms";
+               "&daily=temperature_2m_max,temperature_2m_min,moon_phase" +
+               "&past_days=1&forecast_days=2&timezone=auto" +
+               "&wind_speed_unit=" + windUnitParam +
+               "&temperature_unit=" + tempUnitParam +
+               "&precipitation_unit=" + precipUnitParam;
 
-  HTTPClient http;
-  if (!http.begin(client, url)) return false;
+  String body;
+  if (!httpsGetBody(url, body)) return false;
 
-  int code = http.GET();
-  if (code != 200) {
-    http.end();
-    return false;
-  }
-
-  String body = http.getString();
-  http.end();
-
-  StaticJsonDocument<4096> doc;
+  StaticJsonDocument<12288> doc;
   if (deserializeJson(doc, body)) return false;
 
   tempC = doc["current"]["temperature_2m"] | NAN;
@@ -1204,33 +1246,38 @@ bool fetchWeather() {
   tempMaxC = NAN;
   tempMinC = NAN;
 
+  // hourly[] is anchored at local midnight yesterday (past_days=1), so
+  // index 24 is today's hour 0. Sum the trailing 24 entries ending at the
+  // current hour to get rolling past-24h precipitation for the Rain widget,
+  // and the leading 24 entries starting at the current hour (forecast_days=2
+  // guarantees they exist even late in the day) for the Rain forecast widget.
+  precipMm = NAN;
+  precipForecastMm = NAN;
+  JsonArray hourlyPrecip = doc["hourly"]["precipitation"];
+  if (hourlyPrecip && !hourlyPrecip.isNull()) {
+    int idxNow = 24 + (minutesNowLocal() / 60);
+    if (idxNow >= 23 && idxNow < (int)hourlyPrecip.size()) {
+      float sum = 0;
+      for (int i = idxNow - 23; i <= idxNow; i++) {
+        sum += hourlyPrecip[i] | 0.0f;
+      }
+      precipMm = sum;
+    }
+    if (idxNow >= 0 && idxNow + 23 < (int)hourlyPrecip.size()) {
+      float sum = 0;
+      for (int i = idxNow; i <= idxNow + 23; i++) {
+        sum += hourlyPrecip[i] | 0.0f;
+      }
+      precipForecastMm = sum;
+    }
+  }
+
   JsonArray maxTemps = doc["daily"]["temperature_2m_max"];
   JsonArray minTemps = doc["daily"]["temperature_2m_min"];
+  JsonArray moonPhases = doc["daily"]["moon_phase"];
   if (maxTemps && !maxTemps.isNull() && maxTemps.size() > 0) tempMaxC = maxTemps[0] | NAN;
   if (minTemps && !minTemps.isNull() && minTemps.size() > 0) tempMinC = minTemps[0] | NAN;
-
-  JsonArray times = doc["hourly"]["time"];
-  JsonArray precs = doc["hourly"]["precipitation"];
-
-  if (times && precs) {
-    time_t nowT = time(nullptr);
-    struct tm tmNow;
-    localtime_r(&nowT, &tmNow);
-
-    char key[20];
-    strftime(key, sizeof(key), "%Y-%m-%dT%H:00", &tmNow);
-
-    int idx = -1;
-    for (int i = 0; i < (int)times.size(); i++) {
-      const char* t = times[i];
-      if (t && String(t).startsWith(key)) {
-        idx = i;
-        break;
-      }
-    }
-    if (idx < 0) idx = 0;
-    precipMm = precs[idx] | NAN;
-  }
+  if (moonPhases && !moonPhases.isNull() && moonPhases.size() > 0) moonPhase = moonPhases[1] | NAN;
 
   lastWeatherFetch = time(nullptr);
   lastSyncTime = lastWeatherFetch;
@@ -1239,58 +1286,100 @@ bool fetchWeather() {
 
 void ensureWeather() {
   time_t nowT = time(nullptr);
-  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) ||
+  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(precipForecastMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) || isnan(moonPhase) ||
        (nowT - lastWeatherFetch) > WEATHER_INTERVAL_SEC) &&
       WiFi.status() == WL_CONNECTED) {
     if (fetchWeather()) dataDirty = true;
   }
 }
 
-bool fetchKpIndex() {
+// =========================================================
+// RADAR DATA
+// =========================================================
+String radarRangeLabel(int idx) {
+  float km = RADAR_RANGES[idx].km;
+  if (unitKey == "imperial") {
+    return String((int)lroundf(km / 1.609344f)) + " mi";
+  }
+  return String((int)lroundf(km)) + " km";
+}
+
+void radarLatLonToXY(float lat, float lon, int &outX, int &outY) {
+  float rangeKm = RADAR_RANGES[radarRangeIndex].km;
+  float pxPerKm = (float)RADAR_OUTER_R / rangeKm;
+  float latCorrection = cosf(LAT * 0.01745329252f);
+  float lonDelta = lon - LNG;
+  if (lonDelta > 180.0f) lonDelta -= 360.0f;
+  else if (lonDelta < -180.0f) lonDelta += 360.0f;
+  float dxKm = lonDelta * 111.0f * latCorrection;
+  float dyKm = (lat - LAT) * 111.0f;
+  outX = RADAR_CX + (int)lroundf(dxKm * pxPerKm);
+  outY = RADAR_CY - (int)lroundf(dyKm * pxPerKm);
+}
+
+bool fetchRadarAircraft() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  float rangeNm = RADAR_RANGES[radarRangeIndex].km / 1.852f;
 
-  HTTPClient http;
-  if (!http.begin(client, "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")) {
-    return false;
+  String url = "https://opendata.adsb.fi/api/v3/lat/" + String(LAT, 6) +
+               "/lon/" + String(LNG, 6) + "/dist/" + String(rangeNm, 1);
+
+  String body;
+  if (!httpsGetBody(url, body, 8000)) return false;
+
+  JsonDocument filter;
+  filter["ac"][0]["lat"] = true;
+  filter["ac"][0]["lon"] = true;
+  filter["ac"][0]["track"] = true;
+  filter["ac"][0]["flight"] = true;
+  filter["ac"][0]["hex"] = true;
+  filter["ac"][0]["alt_baro"] = true;
+
+  JsonDocument doc;
+  if (deserializeJson(doc, body, DeserializationOption::Filter(filter))) return false;
+
+  JsonArray ac = doc["ac"].as<JsonArray>();
+
+  xSemaphoreTake(radarDataMutex, portMAX_DELAY);
+  radarAircraftCount = 0;
+  if (!ac.isNull()) {
+    for (JsonObject plane : ac) {
+      if (radarAircraftCount >= RADAR_MAX_AIRCRAFT) break;
+      if (!plane["lat"].is<float>() || !plane["lon"].is<float>()) continue;
+      if (plane["alt_baro"] == "ground") continue;
+
+      RadarAircraft &a = radarAircraft[radarAircraftCount];
+      a.lat = plane["lat"].as<float>();
+      a.lon = plane["lon"].as<float>();
+      a.hasTrack = plane["track"].is<float>();
+      a.trackDeg = a.hasTrack ? plane["track"].as<float>() : 0.0f;
+
+      String callsign = plane["flight"] | "";
+      callsign.trim();
+      if (callsign.length() == 0) callsign = plane["hex"] | "";
+      a.callsign = callsign;
+
+      a.altText = plane["alt_baro"].is<float>()
+        ? String((int)plane["alt_baro"].as<float>()) + "ft"
+        : "";
+
+      radarAircraftCount++;
+    }
   }
+  xSemaphoreGive(radarDataMutex);
 
-  int code = http.GET();
-  if (code != 200) {
-    http.end();
-    return false;
-  }
-
-  String body = http.getString();
-  http.end();
-
-  int lastRow = body.lastIndexOf('[');
-  if (lastRow < 0) return false;
-
-  int firstComma = body.indexOf(',', lastRow);
-  if (firstComma < 0) return false;
-
-  int q1 = body.indexOf('"', firstComma);
-  if (q1 < 0) return false;
-  int q2 = body.indexOf('"', q1 + 1);
-  if (q2 < 0) return false;
-
-  String kpStrLocal = body.substring(q1 + 1, q2);
-  kpIndex = kpStrLocal.toFloat();
-
-  lastKpFetch = time(nullptr);
-  lastSyncTime = lastKpFetch;
   return true;
 }
 
-void ensureKpIndex() {
-  time_t nowT = time(nullptr);
-  if ((isnan(kpIndex) || (nowT - lastKpFetch) > KP_INTERVAL_SEC) &&
-      WiFi.status() == WL_CONNECTED) {
-    if (fetchKpIndex()) dataDirty = true;
+void radarFetchTaskFn(void *param) {
+  if (fetchRadarAircraft()) {
+    radarDirty = true;
+    radarDataLoaded = true;
   }
+  lastRadarFetch = millis();
+  radarFetchInProgress = false;
+  vTaskDelete(nullptr);
 }
 
 // =========================================================
@@ -1333,7 +1422,7 @@ void drawNavBar() {
   tft.drawFastHLine(0, y, SCREEN_W, COL_STROKE);
 
   const int btnW = SCREEN_W / 4;
-  const char* names[4] = {"Home", "Weather", "Notes", "Status"};
+  const char* names[4] = {"Home", "Weather", "Radar", "Status"};
 
   for (int i = 0; i < 4; i++) {
     int bx = i * btnW;
@@ -1383,85 +1472,35 @@ void drawMoonIcon(TFT_eSprite& spr, int cx, int cy, uint16_t c) {
   spr.fillCircle(cx + 4, cy - 2, 6, COL_PANEL);
 }
 
-int drawWrappedTextLimited(int x, int y, int maxW, const String& text, int font, uint16_t fg, uint16_t bg, int maxLines) {
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(fg, bg);
-
-  const int lineH = tft.fontHeight(font) + 2;
-  String line = "";
-  String word = "";
-  int linesDrawn = 0;
-
-  auto flushLine = [&]() {
-    if (linesDrawn >= maxLines) return;
-    if (line.length() > 0) tft.drawString(line, x, y, font);
-    y += lineH;
-    line = "";
-    linesDrawn++;
-  };
-
-  auto placeWordOnEmptyLine = [&]() {
-    if (word.length() == 0 || linesDrawn >= maxLines) return;
-
-    while (tft.textWidth(word, font) > maxW && word.length() > 1) {
-      int cut = word.length();
-      while (cut > 1 && tft.textWidth(word.substring(0, cut), font) > maxW) cut--;
-      if (linesDrawn >= maxLines) return;
-      tft.drawString(word.substring(0, cut), x, y, font);
-      y += lineH;
-      linesDrawn++;
-      word = word.substring(cut);
-    }
-
-    if (linesDrawn < maxLines) {
-      line = word;
-      word = "";
-    }
-  };
-
-  auto flushWord = [&]() {
-    if (word.length() == 0 || linesDrawn >= maxLines) return;
-
-    if (line.length() == 0) {
-      placeWordOnEmptyLine();
-      return;
-    }
-
-    String candidate = line + " " + word;
-    if (tft.textWidth(candidate, font) <= maxW) {
-      line = candidate;
-      word = "";
-      return;
-    }
-
-    flushLine();
-    placeWordOnEmptyLine();
-  };
-
-  for (int i = 0; i < (int)text.length(); i++) {
-    if (linesDrawn >= maxLines) break;
-    char c = text[i];
-
-    if (c == '\n') {
-      flushWord();
-      flushLine();
-      continue;
-    }
-
-    if (c == ' ') {
-      flushWord();
-      continue;
-    }
-
-    word += c;
+// Renders the moon disc from the API phase fraction (0 = new, 0.5 = full).
+template <typename Display>
+void drawMoonPhaseGraphic(Display& spr, int cx, int cy, int r, float phase, uint16_t litColor, uint16_t darkColor) {
+  if (isnan(phase)) phase = 0.5f;
+  phase = constrain(phase, 0.0f, 1.0f);
+  if (phase == 0.0f || phase == 1.0f) {
+    spr.fillCircle(cx, cy, r, darkColor);
+    return;
   }
+  float terminatorScale = cosf(6.28318530718f * phase);
+  bool waxing = phase < 0.5f;
 
-  if (linesDrawn < maxLines) {
-    flushWord();
-    if (line.length() > 0) flushLine();
+  for (int dy = -r; dy <= r; dy++) {
+    int rowR = (int)lroundf(sqrtf((float)(r * r - dy * dy)));
+    if (rowR <= 0) continue;
+    int termX = (int)lroundf(rowR * terminatorScale * (waxing ? 1.0f : -1.0f));
+
+    if (waxing) {
+      int darkW = termX + rowR;
+      if (darkW > 0) spr.drawFastHLine(cx - rowR, cy + dy, darkW, darkColor);
+      int litW = rowR - termX + 1;
+      if (litW > 0) spr.drawFastHLine(cx + termX, cy + dy, litW, litColor);
+    } else {
+      int litW = termX + rowR + 1;
+      if (litW > 0) spr.drawFastHLine(cx - rowR, cy + dy, litW, litColor);
+      int darkW = rowR - termX;
+      if (darkW > 0) spr.drawFastHLine(cx + termX + 1, cy + dy, darkW, darkColor);
+    }
   }
-
-  return y;
 }
 
 // =========================================================
@@ -1565,6 +1604,45 @@ void drawWeatherStyleMetricSprite(int x, int y, int w, int h, const char* label,
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
+void drawRainCombinedWidget(int x, int y, int w, int h, String& cache, bool force = false) {
+  String past = rainText();
+  String next = rainForecastText();
+  String combined = past + "|" + next + "|" + String(COL_PANEL) + "|" +
+                    String(COL_STROKE) + "|" + String(COL_TEXT) + "|" + String(COL_ACCENT);
+
+  if (!force && combined == cache) return;
+  cache = combined;
+
+  makeSpriteCard(sprSmall, w, h, true);
+
+  sprSmall.setTextDatum(TL_DATUM);
+
+  const int padTop = 6;
+  const int padBottom = 6;
+  const int padLeft = 8;
+  const int labelValueGap = 8;
+  const int rowGap = 6;
+  const int rowH = (h - padTop - padBottom - rowGap) / 2;
+  const int row1Y = padTop;
+  const int row2Y = padTop + rowH + rowGap;
+
+  int labelW = max(sprSmall.textWidth("Past", 1), sprSmall.textWidth("Next", 1));
+  int valueX = padLeft + labelW + labelValueGap;
+
+  sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
+  sprSmall.drawString("Past", padLeft, row1Y + (rowH - 8) / 2, 1);
+  sprSmall.drawString("Next", padLeft, row2Y + (rowH - 8) / 2, 1);
+
+  sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+  sprSmall.setFreeFont(&RainValueFont);
+  const int valueH = 17;
+  sprSmall.drawString(past, valueX, row1Y + (rowH - valueH) / 2, GFXFF);
+  sprSmall.drawString(next, valueX, row2Y + (rowH - valueH) / 2, GFXFF);
+  sprSmall.setFreeFont(nullptr);
+
+  pushSpriteAndDelete(sprSmall, x, y);
+}
+
 void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = false) {
   String label = nextSunLabel();
   String value = nextSunTimeText();
@@ -1593,6 +1671,36 @@ void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = 
   } else {
     sprSmall.drawString(value, 10, 30, 4);
   }
+
+  pushSpriteAndDelete(sprSmall, x, y);
+}
+
+void drawMoonPhaseWidget(int x, int y, int w, int h, String& cache, bool force = false) {
+  String value = moonPhaseText();
+  String detail = moonPhaseLabelText();
+  String combined = value + "|" + detail + "|" + String(moonPhase, 3) + "|" + String(COL_PANEL) + "|" +
+                    String(COL_STROKE) + "|" + String(COL_TEXT) + "|" + String(COL_ACCENT);
+
+  if (!force && combined == cache) return;
+  cache = combined;
+
+  makeSpriteCard(sprSmall, w, h, true);
+
+  sprSmall.setTextDatum(TL_DATUM);
+  sprSmall.setTextColor(COL_DIM, COL_PANEL);
+  sprSmall.drawString("Moon", 10, 8, 2);
+
+  sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+  sprSmall.drawString(value, 10, 30, 4);
+
+  sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
+  sprSmall.drawString(detail, 10, 54, 1);
+
+  const int iconCx = w - 22;
+  const int iconCy = h / 2;
+  const int iconR = 16;
+  drawMoonPhaseGraphic(sprSmall, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
+  sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
 
   pushSpriteAndDelete(sprSmall, x, y);
 }
@@ -1656,14 +1764,11 @@ void drawHomeSlotWidget(int slot, bool force = false) {
     case HOME_WIDGET_TIMER:
       drawFocusTimerWidget(x, y, w, h, cacheHomeSlots[slot], force);
       break;
-    case HOME_WIDGET_RAIN:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Rain", rainText(), cacheHomeSlots[slot], force);
+    case HOME_WIDGET_RAIN_COMBINED:
+      drawRainCombinedWidget(x, y, w, h, cacheHomeSlots[slot], force);
       break;
     case HOME_WIDGET_OUTDOOR:
       drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempText(), cacheHomeSlots[slot], force, tempRangeText());
-      break;
-    case HOME_WIDGET_KP:
-      drawWeatherStyleMetricSprite(x, y, w, h, "KP index", kpText(), cacheHomeSlots[slot], force, kpLevelText());
       break;
     case HOME_WIDGET_UV:
       drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), cacheHomeSlots[slot], force, uvLevelText());
@@ -1673,6 +1778,9 @@ void drawHomeSlotWidget(int slot, bool force = false) {
       break;
     case HOME_WIDGET_SUN:
       drawSunEventWidget(x, y, w, h, cacheHomeSlots[slot], force);
+      break;
+    case HOME_WIDGET_MOON:
+      drawMoonPhaseWidget(x, y, w, h, cacheHomeSlots[slot], force);
       break;
   }
 }
@@ -1827,11 +1935,11 @@ void drawWeatherPageFull() {
   lastDrawnPage = PAGE_WEATHER;
 
   lastTempText = "";
-  lastRainText = "";
+  cacheWeatherRain = "";
   lastUvText = "";
   lastUvLevelText = "";
-  lastKpText = "";
-  lastKpLevelText = "";
+  lastMoonText = "";
+  lastMoonLevelText = "";
   lastWindText = "";
   lastWindDirText = "";
   lastNextSunLabel = "";
@@ -1853,15 +1961,7 @@ void updateWeatherDynamic() {
     lastTempText = tempCombined;
   }
 
-  String r = rainText();
-  if (r != lastRainText) {
-    tft.fillRect(134, PAGE_ROW1_Y + 30, 88, 24, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("Rain", 134, PAGE_ROW1_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(r, 134, PAGE_ROW1_Y + 30, 4);
-    lastRainText = r;
-  }
+  drawRainCombinedWidget(124, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherRain);
 
   String u = uvText();
   String ul = uvLevelText();
@@ -1914,39 +2014,140 @@ void updateWeatherDynamic() {
     lastNextSunTime = nt;
   }
 
-  String k = kpText();
-  String kl = kpLevelText();
-  if (k != lastKpText || kl != lastKpLevelText || dataDirty) {
-    tft.fillRect(134, PAGE_ROW3_Y + 30, 88, 30, COL_PANEL);
+  String mv = moonPhaseText();
+  String ml = moonPhaseLabelText();
+  if (mv != lastMoonText || ml != lastMoonLevelText || dataDirty) {
+    tft.fillRect(126, PAGE_ROW3_Y + 6, 104, PAGE_WIDGET_H - 12, COL_PANEL);
     tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("KP index", 134, PAGE_ROW3_Y + 8, 2);
+    tft.drawString("Moon", 134, PAGE_ROW3_Y + 8, 2);
     tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(k, 134, PAGE_ROW3_Y + 28, 4);
+    tft.drawString(mv, 134, PAGE_ROW3_Y + 28, 4);
     tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(kl, 134, PAGE_ROW3_Y + 52, 1);
-    lastKpText = k;
-    lastKpLevelText = kl;
+    tft.drawString(ml, 134, PAGE_ROW3_Y + 52, 1);
+
+    const int iconCx = 210;
+    const int iconCy = PAGE_ROW3_Y + PAGE_WIDGET_H / 2;
+    const int iconR = 16;
+    drawMoonPhaseGraphic(tft, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
+    tft.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
+
+    lastMoonText = mv;
+    lastMoonLevelText = ml;
   }
 }
 
-void drawNotesPageFull() {
-  tft.fillScreen(COL_BG);
-  drawTopBar("Notes");
-  drawNavBar();
+void radarDrawGrid() {
+  const int cx = RADAR_CX, cy = RADAR_CY, r = RADAR_OUTER_R;
 
-  drawCard(8, 42, 224, 226, true);
+  tft.fillCircle(cx, cy, r, TFT_BLACK);
+  for (int i = 1; i <= RADAR_RING_COUNT; i++) {
+    tft.drawCircle(cx, cy, (r * i) / RADAR_RING_COUNT, COL_STROKE);
+  }
+  tft.drawCircle(cx, cy, r, COL_ACCENT);
+  tft.drawFastHLine(cx - r, cy, r * 2, COL_STROKE);
+  tft.drawFastVLine(cx, cy - r, r * 2, COL_STROKE);
+  tft.fillCircle(cx, cy, 2, COL_ACCENT);
 
-  pageDirty = false;
-  lastDrawnPage = PAGE_NOTES;
-  lastNotesText = "";
+  tft.setTextColor(COL_TEXT);
+  tft.setTextDatum(BC_DATUM);
+  tft.drawString("N", cx, cy - r - 4, 2);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString("S", cx, cy + r + 4, 2);
+  tft.setTextDatum(MR_DATUM);
+  tft.drawString("W", cx - r - 6, cy, 2);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("E", cx + r + 6, cy, 2);
+
+  tft.setTextColor(COL_DIM);
+  tft.setTextDatum(MR_DATUM);
+  tft.drawString(radarRangeLabel(radarRangeIndex), cx + r + 6, cy + r - 4, 1);
+
+  tft.setTextDatum(TL_DATUM);
 }
 
-void updateNotesDynamic() {
-  if (notesText != lastNotesText || notesDirty) {
-    tft.fillRect(18, 54, 204, 196, COL_PANEL);
-    drawWrappedTextLimited(18, 54, 198, notesText, 2, COL_TEXT, COL_PANEL, 12);
-    lastNotesText = notesText;
-    notesDirty = false;
+void radarDrawAircraft() {
+  xSemaphoreTake(radarDataMutex, portMAX_DELAY);
+  for (int i = 0; i < radarAircraftCount; i++) {
+    RadarAircraft &a = radarAircraft[i];
+    int x, y;
+    radarLatLonToXY(a.lat, a.lon, x, y);
+
+    int dx = x - RADAR_CX;
+    int dy = y - RADAR_CY;
+    if (dx * dx + dy * dy > RADAR_OUTER_R * RADAR_OUTER_R) continue;
+
+    if (a.hasTrack) {
+      float rad = a.trackDeg * 0.01745329252f;
+      float sinH = sinf(rad), cosH = cosf(rad);
+      int noseX = x + (int)lroundf(sinH * 7.0f);
+      int noseY = y - (int)lroundf(cosH * 7.0f);
+      int tailX = x - (int)lroundf(sinH * 3.0f);
+      int tailY = y + (int)lroundf(cosH * 3.0f);
+      int wingX = (int)lroundf(cosH * 4.0f);
+      int wingY = (int)lroundf(sinH * 4.0f);
+      tft.fillTriangle(noseX, noseY, tailX + wingX, tailY + wingY, tailX - wingX, tailY - wingY, COL_ACCENT);
+    } else {
+      tft.fillCircle(x, y, 3, COL_ACCENT);
+    }
+
+    if (a.callsign.length() > 0) {
+      bool labelRight = x < RADAR_CX;
+      tft.setTextColor(COL_TEXT);
+      if (labelRight) {
+        tft.setTextDatum(ML_DATUM);
+        tft.drawString(a.callsign, x + 8, y - 5, 1);
+        if (a.altText.length() > 0) tft.drawString(a.altText, x + 8, y + 5, 1);
+      } else {
+        tft.setTextDatum(MR_DATUM);
+        tft.drawString(a.callsign, x - 8, y - 5, 1);
+        if (a.altText.length() > 0) tft.drawString(a.altText, x - 8, y + 5, 1);
+      }
+    }
+  }
+  xSemaphoreGive(radarDataMutex);
+  tft.setTextDatum(TL_DATUM);
+}
+
+void radarDrawLoadedIndicator() {
+  const int x = 8;
+  const int y = SCREEN_H - NAV_H - 10;
+  if (radarDataLoaded) {
+    tft.fillCircle(x, y, 3, COL_GREEN);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setTextDatum(ML_DATUM);
+    tft.drawString("Loaded", x + 7, y, 1);
+    tft.setTextDatum(TL_DATUM);
+  }
+}
+
+void radarRenderFrame() {
+  radarDrawGrid();
+  radarDrawAircraft();
+  radarDrawLoadedIndicator();
+}
+
+void drawRadarPageFull() {
+  tft.fillScreen(COL_BG);
+  drawTopBar("Radar");
+  drawNavBar();
+
+  radarRenderFrame();
+
+  pageDirty = false;
+  lastDrawnPage = PAGE_RADAR;
+  radarDirty = false;
+}
+
+void updateRadarDynamic() {
+  if (!radarFetchInProgress && WiFi.status() == WL_CONNECTED &&
+      millis() - lastRadarFetch >= RADAR_FETCH_INTERVAL_MS) {
+    radarFetchInProgress = true;
+    xTaskCreatePinnedToCore(radarFetchTaskFn, "radarFetch", 16384, nullptr, 1, nullptr, 0);
+  }
+
+  if (radarDirty) {
+    radarRenderFrame();
+    radarDirty = false;
   }
 }
 
@@ -2036,7 +2237,7 @@ void drawCurrentPageFull() {
   switch (currentPage) {
     case PAGE_HOME:    drawHomePageFull(); break;
     case PAGE_WEATHER: drawWeatherPageFull(); break;
-    case PAGE_NOTES:   drawNotesPageFull(); break;
+    case PAGE_RADAR:   drawRadarPageFull(); break;
     case PAGE_STATUS:  drawStatusPageFull(); break;
   }
 
@@ -2058,7 +2259,7 @@ void updateCurrentPageDynamic() {
   switch (currentPage) {
     case PAGE_HOME:    updateHomeDynamic(); break;
     case PAGE_WEATHER: updateWeatherDynamic(); break;
-    case PAGE_NOTES:   updateNotesDynamic(); break;
+    case PAGE_RADAR:   updateRadarDynamic(); break;
     case PAGE_STATUS:  updateStatusDynamic(); break;
   }
 }
@@ -2159,6 +2360,21 @@ bool handleStatusTouch(int x, int y) {
   return false;
 }
 
+bool handleRadarTouch(int x, int y) {
+  if (currentPage != PAGE_RADAR) return false;
+
+  int dx = x - RADAR_CX;
+  int dy = y - RADAR_CY;
+  if (dx * dx + dy * dy > RADAR_OUTER_R * RADAR_OUTER_R) return false;
+
+  radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_COUNT;
+  prefs.putUChar("radarRange", (uint8_t)radarRangeIndex);
+  lastRadarFetch = 0;
+  radarDataLoaded = false;
+  pageDirty = true;
+  return true;
+}
+
 // =========================================================
 // NAVIGATION
 // =========================================================
@@ -2173,6 +2389,10 @@ void handleNavTouch(int x, int y) {
   if (newPage != currentPage) {
     currentPage = newPage;
     pageDirty = true;
+    if (newPage == PAGE_RADAR) {
+      lastRadarFetch = 0;
+      radarDataLoaded = false;
+    }
   }
 }
 
@@ -2180,14 +2400,14 @@ void handleNavTouch(int x, int y) {
 // WEB SERVER
 // =========================================================
 void handleRoot() {
-  String accent = prefs.getString("accent", "cyan");
-  String bg     = prefs.getString("bg", "slate");
-  String txt    = prefs.getString("text", "standard");
-  String units  = prefs.getString("units", "metric");
-  String region = prefs.getString("region", "europe");
-  String tz     = sanitizeTimezoneKey(prefs.getString("tz", "europe_central"));
-  String nickname = prefs.getString("nickname", "");
-  bool flashMode = prefs.getBool("flashMode", false);
+  String accent = accentKey;
+  String bg     = bgKey;
+  String txt    = textColorKey;
+  String units  = unitKey;
+  String region = regionFormatKey;
+  String tz     = timezoneKey;
+  String nickname = buddyNickname;
+  bool flashMode = flashModeEnabled;
   String homeSlotKeys[HOME_SLOT_COUNT];
   for (int i = 0; i < HOME_SLOT_COUNT; i++) {
     homeSlotKeys[i] = prefs.getString((String("homeSlot") + String(i)).c_str(), homeWidgetKey(homeWidgetSlots[i]));
@@ -2252,7 +2472,7 @@ void handleRoot() {
   page += "</style></head><body><div class='wrap'>";
   page += "<div class='hero'>";
   page += "<h1>Deskbuddy</h1>";
-  page += "<p>Shape Deskbuddy into your own desk companion with widgets, notes, colors, and smart daily tools.</p>";
+  page += "<p>Shape Deskbuddy into your own desk companion with widgets, plane radar, colors, and smart daily tools.</p>";
   page += "<div class='ip'>ESP IP: ";
   page += WiFi.localIP().toString();
   page += "</div></div>";
@@ -2260,15 +2480,16 @@ void handleRoot() {
   page += "<form method='POST' action='/save'>";
   page += "<div class='layout'><div class='stack'>";
 
-  page += "<div class='panel' data-panel='notes'>";
-  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Notes</h2><span class='panel-chevron'>&#9662;</span></button>";
+  page += "<div class='panel' data-panel='radar'>";
+  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Plane radar</h2><span class='panel-chevron'>&#9662;</span></button>";
   page += "<div class='panel-body'>";
-  page += "<p>Short notes synced to the device.</p>";
-  page += "<label class='label'>Notes</label>";
-  page += "<textarea name='notes' maxlength='700'>";
-  page += htmlEscape(notesText);
-  page += "</textarea>";
-  page += "<div class='muted'>Saved notes show up right away.</div>";
+  page += "<p>Live aircraft near your saved location (see Location below), from adsb.fi open data.</p>";
+  page += "<label class='label'>Radar range</label><select name='radarRange'>";
+  for (int i = 0; i < RADAR_RANGE_COUNT; i++) {
+    page += "<option value='" + String(i) + "'" + String(radarRangeIndex == i ? " selected" : "") + ">" + radarRangeLabel(i) + "</option>";
+  }
+  page += "</select>";
+  page += "<div class='muted'>Tap the radar screen on the device to cycle range too.</div>";
   page += "</div></div>";
 
   page += "<div class='panel' data-panel='theme'>";
@@ -2282,50 +2503,19 @@ void handleRoot() {
   page += "<div class='color-row'><div class='color-meta'><label class='label'>Accent</label><span class='color-value' id='accent-value'>";
   page += accent;
   page += "</span></div><div class='swatch-row'>";
-  page += "<label class='swatch" + String(accent=="standard"?" active":"") + "' style='background:" + accentPreviewCss("standard") + ";'><input type='radio' name='accent' value='standard'" + String(accent=="standard"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="ice"?" active":"") + "' style='background:" + accentPreviewCss("ice") + ";'><input type='radio' name='accent' value='ice'" + String(accent=="ice"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="white"?" active":"") + "' style='background:" + accentPreviewCss("white") + ";'><input type='radio' name='accent' value='white'" + String(accent=="white"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="cyan"?" active":"") + "' style='background:" + accentPreviewCss("cyan") + ";'><input type='radio' name='accent' value='cyan'" + String(accent=="cyan"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="mint"?" active":"") + "' style='background:" + accentPreviewCss("mint") + ";'><input type='radio' name='accent' value='mint'" + String(accent=="mint"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="green"?" active":"") + "' style='background:" + accentPreviewCss("green") + ";'><input type='radio' name='accent' value='green'" + String(accent=="green"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="blue"?" active":"") + "' style='background:" + accentPreviewCss("blue") + ";'><input type='radio' name='accent' value='blue'" + String(accent=="blue"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="purple"?" active":"") + "' style='background:" + accentPreviewCss("purple") + ";'><input type='radio' name='accent' value='purple'" + String(accent=="purple"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="pink"?" active":"") + "' style='background:" + accentPreviewCss("pink") + ";'><input type='radio' name='accent' value='pink'" + String(accent=="pink"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="orange"?" active":"") + "' style='background:" + accentPreviewCss("orange") + ";'><input type='radio' name='accent' value='orange'" + String(accent=="orange"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="amber"?" active":"") + "' style='background:" + accentPreviewCss("amber") + ";'><input type='radio' name='accent' value='amber'" + String(accent=="amber"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(accent=="red"?" active":"") + "' style='background:" + accentPreviewCss("red") + ";'><input type='radio' name='accent' value='red'" + String(accent=="red"?" checked":"") + "></label>";
+  appendColorSwatches(page, "accent", accent, ACCENT_KEYS, ACCENT_KEY_COUNT, accentPreviewCss);
   page += "</div></div>";
 
   page += "<div class='color-row'><div class='color-meta'><label class='label'>Text</label><span class='color-value' id='text-value'>";
   page += txt;
   page += "</span></div><div class='swatch-row'>";
-  page += "<label class='swatch" + String(txt=="standard"?" active":"") + "' style='background:" + accentPreviewCss("standard") + ";'><input type='radio' name='text' value='standard'" + String(txt=="standard"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="ice"?" active":"") + "' style='background:" + accentPreviewCss("ice") + ";'><input type='radio' name='text' value='ice'" + String(txt=="ice"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="white"?" active":"") + "' style='background:" + accentPreviewCss("white") + ";'><input type='radio' name='text' value='white'" + String(txt=="white"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="cyan"?" active":"") + "' style='background:" + accentPreviewCss("cyan") + ";'><input type='radio' name='text' value='cyan'" + String(txt=="cyan"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="mint"?" active":"") + "' style='background:" + accentPreviewCss("mint") + ";'><input type='radio' name='text' value='mint'" + String(txt=="mint"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="green"?" active":"") + "' style='background:" + accentPreviewCss("green") + ";'><input type='radio' name='text' value='green'" + String(txt=="green"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="blue"?" active":"") + "' style='background:" + accentPreviewCss("blue") + ";'><input type='radio' name='text' value='blue'" + String(txt=="blue"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="purple"?" active":"") + "' style='background:" + accentPreviewCss("purple") + ";'><input type='radio' name='text' value='purple'" + String(txt=="purple"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="pink"?" active":"") + "' style='background:" + accentPreviewCss("pink") + ";'><input type='radio' name='text' value='pink'" + String(txt=="pink"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="orange"?" active":"") + "' style='background:" + accentPreviewCss("orange") + ";'><input type='radio' name='text' value='orange'" + String(txt=="orange"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="amber"?" active":"") + "' style='background:" + accentPreviewCss("amber") + ";'><input type='radio' name='text' value='amber'" + String(txt=="amber"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(txt=="red"?" active":"") + "' style='background:" + accentPreviewCss("red") + ";'><input type='radio' name='text' value='red'" + String(txt=="red"?" checked":"") + "></label>";
+  appendColorSwatches(page, "text", txt, ACCENT_KEYS, ACCENT_KEY_COUNT, accentPreviewCss);
   page += "</div></div>";
 
   page += "<div class='color-row'><div class='color-meta'><label class='label'>Theme</label><span class='color-value' id='bg-value'>";
   page += bg;
   page += "</span></div><div class='swatch-row'>";
-  page += "<label class='swatch" + String(bg=="slate"?" active":"") + "' style='background:" + themePreviewCss("slate") + ";'><input type='radio' name='bg' value='slate'" + String(bg=="slate"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="deep"?" active":"") + "' style='background:" + themePreviewCss("deep") + ";'><input type='radio' name='bg' value='deep'" + String(bg=="deep"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="nordic"?" active":"") + "' style='background:" + themePreviewCss("nordic") + ";'><input type='radio' name='bg' value='nordic'" + String(bg=="nordic"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="forest"?" active":"") + "' style='background:" + themePreviewCss("forest") + ";'><input type='radio' name='bg' value='forest'" + String(bg=="forest"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="coffee"?" active":"") + "' style='background:" + themePreviewCss("coffee") + ";'><input type='radio' name='bg' value='coffee'" + String(bg=="coffee"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="soft"?" active":"") + "' style='background:" + themePreviewCss("soft") + ";'><input type='radio' name='bg' value='soft'" + String(bg=="soft"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="midnight"?" active":"") + "' style='background:" + themePreviewCss("midnight") + ";'><input type='radio' name='bg' value='midnight'" + String(bg=="midnight"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="graphite"?" active":"") + "' style='background:" + themePreviewCss("graphite") + ";'><input type='radio' name='bg' value='graphite'" + String(bg=="graphite"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="garnet"?" active":"") + "' style='background:" + themePreviewCss("garnet") + ";'><input type='radio' name='bg' value='garnet'" + String(bg=="garnet"?" checked":"") + "></label>";
-  page += "<label class='swatch" + String(bg=="ochre"?" active":"") + "' style='background:" + themePreviewCss("ochre") + ";'><input type='radio' name='bg' value='ochre'" + String(bg=="ochre"?" checked":"") + "></label>";
+  appendColorSwatches(page, "bg", bg, BG_KEYS, BG_KEY_COUNT, themePreviewCss);
   page += "</div></div>";
 
   page += "</div>";
@@ -2432,12 +2622,12 @@ void handleRoot() {
 }
 
 void handleSave() {
-  String newNotes  = server.hasArg("notes") ? server.arg("notes") : notesText;
-  String newAccent = server.hasArg("accent") ? server.arg("accent") : "cyan";
-  String newBg     = server.hasArg("bg") ? server.arg("bg") : "slate";
-  String newText   = server.hasArg("text") ? server.arg("text") : "standard";
-  String newUnits  = server.hasArg("units") ? server.arg("units") : "metric";
-  String newRegion = server.hasArg("region") ? server.arg("region") : "europe";
+  int newRadarRange = server.hasArg("radarRange") ? server.arg("radarRange").toInt() : radarRangeIndex;
+  String newAccent = server.hasArg("accent") ? server.arg("accent") : accentKey;
+  String newBg     = server.hasArg("bg") ? server.arg("bg") : bgKey;
+  String newText   = server.hasArg("text") ? server.arg("text") : textColorKey;
+  String newUnits  = server.hasArg("units") ? server.arg("units") : unitKey;
+  String newRegion = server.hasArg("region") ? server.arg("region") : regionFormatKey;
   String newTz     = server.hasArg("tz") ? server.arg("tz") : timezoneKey;
   String newLoc    = server.hasArg("locname") ? server.arg("locname") : locationName;
   String newNickname = server.hasArg("nickname") ? server.arg("nickname") : buddyNickname;
@@ -2451,16 +2641,14 @@ void handleSave() {
   float newLat = server.hasArg("lat") ? server.arg("lat").toFloat() : LAT;
   float newLng = server.hasArg("lng") ? server.arg("lng").toFloat() : LNG;
 
-  newNotes.trim();
   newLoc.trim();
   newNickname.trim();
 
-  if (newNotes.length() == 0) newNotes = "No notes yet.";
-  if (newNotes.length() > 700) newNotes = newNotes.substring(0, 700);
+  radarRangeIndex = constrain(newRadarRange, 0, RADAR_RANGE_COUNT - 1);
   if (newLoc.length() == 0) newLoc = "Unknown";
   if (newNickname.length() > 24) newNickname = newNickname.substring(0, 24);
-  if (newUnits != "metric" && newUnits != "imperial") newUnits = "metric";
-  if (newRegion != "europe" && newRegion != "us") newRegion = "europe";
+  if (newUnits != "metric" && newUnits != "imperial") newUnits = "imperial";
+  if (newRegion != "europe" && newRegion != "us") newRegion = "us";
   newTz = sanitizeTimezoneKey(newTz);
 
   int newSleepMin = server.hasArg("sleepMin") ? server.arg("sleepMin").toInt() : sleepIntervalMin;
@@ -2472,11 +2660,15 @@ void handleSave() {
     (fabsf(newLng - LNG) > 0.0001f) ||
     (newLoc != locationName);
 
-  notesText = newNotes;
+  bool unitsChanged = newUnits != unitKey;
+
   buddyNickname = newNickname;
   locationName = newLoc;
   LAT = newLat;
   LNG = newLng;
+  accentKey = newAccent;
+  bgKey = newBg;
+  textColorKey = newText;
   unitKey = newUnits;
   regionFormatKey = newRegion;
   timezoneKey = newTz;
@@ -2492,10 +2684,10 @@ void handleSave() {
     timerPresetMin[i] = sanitizeTimerMinutes(nextValue);
   }
 
-  prefs.putString("notes", notesText);
-  prefs.putString("accent", newAccent);
-  prefs.putString("bg", newBg);
-  prefs.putString("text", newText);
+  prefs.putUChar("radarRange", (uint8_t)radarRangeIndex);
+  prefs.putString("accent", accentKey);
+  prefs.putString("bg", bgKey);
+  prefs.putString("text", textColorKey);
   prefs.putString("units", unitKey);
   prefs.putString("region", regionFormatKey);
   prefs.putString("tz", timezoneKey);
@@ -2514,12 +2706,13 @@ void handleSave() {
     prefs.putInt(key.c_str(), timerPresetMin[i]);
   }
 
-  applyThemeByKey(newAccent, newBg);
-  applyTextColorByKey(newText);
+  applyThemeByKey(accentKey, bgKey);
+  applyTextColorByKey(textColorKey);
   applyDeviceTimezoneByKey(timezoneKey);
   if (!sleepDimmed && !sleepOff) setBacklight(BL_FULL);
 
-  notesDirty = true;
+  lastRadarFetch = 0;
+  radarDataLoaded = false;
   pageDirty = true;
   dataDirty = true;
 
@@ -2534,16 +2727,16 @@ void handleSave() {
   }
 
   lastTempText = "";
-  lastRainText = "";
-  lastKpText = "";
-  lastKpLevelText = "";
+  cacheWeatherRain = "";
+  lastMoonText = "";
+  lastMoonLevelText = "";
   lastWindText = "";
   lastWindDirText = "";
   lastNextSunLabel = "";
   lastNextSunTime = "";
   lastUptimeText = "";
 
-  if (locationChanged) resetDataCaches();
+  if (locationChanged || unitsChanged) resetDataCaches();
 
   server.sendHeader("Location", "/");
   server.send(303);
@@ -2601,7 +2794,6 @@ void updateWiFiConnectionState() {
     wifiConnectInProgress = false;
     ensureSunTimesForToday();
     ensureWeather();
-    ensureKpIndex();
     dataDirty = true;
     pageDirty = true;
     return;
@@ -2632,28 +2824,24 @@ void setWifiEnabled(bool enabled) {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(BACKLIGHT_PIN, OUTPUT);
-  analogWrite(BACKLIGHT_PIN, BL_FULL);
-  pinMode(27, OUTPUT);
-  digitalWrite(27, HIGH);
-
   loadStoredSettings();
-  setBacklight(BL_FULL);
   lastInteractionMs = millis();
 
   delay(200);
 
   tft.init();
   tft.setRotation(ROT);
-  tft.invertDisplay(INV);
-  tft.setSwapBytes(true);
+  pinMode(BACKLIGHT_PIN, OUTPUT);
+  setBacklight(BL_FULL);
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Booting SAKI Deskbuddy...", 10, 10, 2);
 
   uint16_t calData[5] = { 294, 3501, 440, 3457, 0 };
-  tft.setTouch(calData);  
+  tft.setTouch(calData);
+
+  radarDataMutex = xSemaphoreCreateMutex();
 
   tft.drawString("Connecting WiFi...", 10, 34, 2);
   connectWiFi(true);
@@ -2665,13 +2853,11 @@ void setup() {
 
   ensureSunTimesForToday();
   ensureWeather();
-  ensureKpIndex();
 
   setupWebServer();
 
   pageDirty = true;
   dataDirty = true;
-  notesDirty = true;
 
   drawCurrentPageFull();
   updateCurrentPageDynamic();
@@ -2718,12 +2904,12 @@ void loop() {
         if (!manualDimMode) {
           wakeDisplay();
         } else {
-          if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty)) {
+          if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty) && !handleRadarTouch(tx, ty)) {
             handleNavTouch(tx, ty);
           }
         }
       } else {
-        if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty)) {
+        if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty) && !handleRadarTouch(tx, ty)) {
           handleNavTouch(tx, ty);
         }
       }
@@ -2734,7 +2920,6 @@ void loop() {
     lastDataTick = millis();
     ensureSunTimesForToday();
     ensureWeather();
-    ensureKpIndex();
   }
 
   if (pageDirty || lastDrawnPage != currentPage) {
