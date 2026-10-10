@@ -153,6 +153,7 @@ enum HomeWidgetType {
   HOME_WIDGET_UV,
   HOME_WIDGET_WIND,
   HOME_WIDGET_SUN,
+  HOME_WIDGET_NEXT_SUN,
   HOME_WIDGET_MOON
 };
 
@@ -202,16 +203,7 @@ String lastWifiText = "";
 String lastSignalText = "";
 String lastIpText = "";
 String lastUptimeText = "";
-String lastTempText = "";
-String cacheWeatherRain = "";
-String lastUvText = "";
-String lastUvLevelText = "";
-String lastMoonText = "";
-String lastMoonLevelText = "";
-String lastWindText = "";
-String lastWindDirText = "";
-String lastNextSunLabel = "";
-String lastNextSunTime = "";
+String cacheWeatherWidgets[6];
 String lastNetworkToggleText = "";
 
 const char* homeWidgetKey(HomeWidgetType type) {
@@ -223,6 +215,7 @@ const char* homeWidgetKey(HomeWidgetType type) {
     case HOME_WIDGET_UV:      return "uv";
     case HOME_WIDGET_WIND:    return "wind";
     case HOME_WIDGET_SUN:     return "sun";
+    case HOME_WIDGET_NEXT_SUN: return "nextsun";
     case HOME_WIDGET_MOON:    return "moon";
     default:                  return "week";
   }
@@ -237,6 +230,7 @@ const char* homeWidgetLabel(HomeWidgetType type) {
     case HOME_WIDGET_UV:      return "UV index";
     case HOME_WIDGET_WIND:    return "Wind";
     case HOME_WIDGET_SUN:     return "Sunrise / sunset";
+    case HOME_WIDGET_NEXT_SUN: return "Next sun event";
     case HOME_WIDGET_MOON:    return "Moon phase";
     default:                  return "Week";
   }
@@ -250,6 +244,7 @@ HomeWidgetType homeWidgetFromKey(const String& key) {
   if (key == "uv") return HOME_WIDGET_UV;
   if (key == "wind") return HOME_WIDGET_WIND;
   if (key == "sun") return HOME_WIDGET_SUN;
+  if (key == "nextsun") return HOME_WIDGET_NEXT_SUN;
   if (key == "moon") return HOME_WIDGET_MOON;
   return HOME_WIDGET_WEEK;
 }
@@ -400,6 +395,7 @@ void appendHomeWidgetOptions(String& page, const String& selectedKey) {
     HOME_WIDGET_UV,
     HOME_WIDGET_WIND,
     HOME_WIDGET_SUN,
+    HOME_WIDGET_NEXT_SUN,
     HOME_WIDGET_MOON
   };
 
@@ -594,9 +590,58 @@ static String formatMinuteOfDay(int minOfDay) {
   return String(buf);
 }
 
-static String tempText() {
-  if (isnan(tempC)) return unitKey == "imperial" ? "-- F" : "-- C";
-  return String((int)round(tempC)) + (unitKey == "imperial" ? "° F" : "° C");
+
+static String nextSunLabel() {
+  int nowMin = minutesNowLocal();
+  if (sunriseMin < 0 || sunsetMin < 0) return "Sun";
+  if (nowMin < sunriseMin) return "Sunrise";
+  if (nowMin < sunsetMin) return "Sunset";
+  return "Sunrise";
+}
+
+static String nextSunTimeText() {
+  int nowMin = minutesNowLocal();
+  if (sunriseMin < 0 || sunsetMin < 0) return "--:--";
+  if (nowMin < sunriseMin) return formatMinuteOfDay(sunriseMin);
+  if (nowMin < sunsetMin) return formatMinuteOfDay(sunsetMin);
+  return formatMinuteOfDay(sunriseMin);
+}
+
+static String nextSunTimeTime(String formatted) {
+  if (!useUsRegionFormat()) {
+    return formatted;
+  }
+  int splitAt = formatted.lastIndexOf(' ');
+  return splitAt >= 0 ? formatted.substring(0, splitAt) : formatted;
+}
+
+static String nextSunTimeAmPm(String formatted) {
+  if (!useUsRegionFormat()) {
+    return "";
+  }
+  int splitAt = formatted.lastIndexOf(' ');
+  return splitAt >= 0 ? formatted.substring(splitAt + 1) : "";
+}
+
+static String preSunEvent() {
+  int nowMin = minutesNowLocal();
+
+  if (nowMin < sunriseMin)
+    return "Set " + formatMinuteOfDay(sunsetMin);
+
+  if (nowMin < sunsetMin)
+    return "Rise " + formatMinuteOfDay(sunriseMin); // Today's sunrise
+
+  return "Set " + formatMinuteOfDay(sunsetMin);
+}
+
+static String tempValue() {
+  if (isnan(tempC)) return "--";
+  return String((int)round(tempC));
+}
+
+static String tempUnit() {
+  return unitKey == "imperial" ? "F" : "C";
 }
 
 static String formatDisplayTemp(float value) {
@@ -625,10 +670,6 @@ static String windSpeed() {
 
 static String windUnit() {
   return unitKey == "imperial" ? "mph" : "m/s";
-}
-
-static String windText() {
-  return windSpeed() + windUnit();
 }
 
 static String windDirectionText() {
@@ -693,22 +734,6 @@ static String uptimeText() {
   if (days > 0) return String(days) + "d " + String(hours) + "h";
   if (hours > 0) return String(hours) + "h " + String(minutes) + "m";
   return String(minutes) + "m";
-}
-
-static String nextSunLabel() {
-  int nowMin = minutesNowLocal();
-  if (sunriseMin < 0 || sunsetMin < 0) return "Sun";
-  if (nowMin < sunriseMin) return "Sunrise";
-  if (nowMin < sunsetMin) return "Sunset";
-  return "Sunrise";
-}
-
-static String nextSunTimeText() {
-  int nowMin = minutesNowLocal();
-  if (sunriseMin < 0 || sunsetMin < 0) return "--:--";
-  if (nowMin < sunriseMin) return formatMinuteOfDay(sunriseMin);
-  if (nowMin < sunsetMin) return formatMinuteOfDay(sunsetMin);
-  return formatMinuteOfDay(sunriseMin);
 }
 
 static String htmlEscape(const String& s) {
@@ -1666,7 +1691,7 @@ void drawMetricSprite(int x, int y, int w, int h, const char* label, const Strin
 }
 
 void drawWeatherStyleMetricSprite(int x, int y, int w, int h,
-                                  const char* label,
+                                  const String& label,
                                   const String& value,
                                   const String& subtext,
                                   String& cache,
@@ -1795,10 +1820,10 @@ void drawMoonPhaseWidget(int x, int y, int w, int h, String& cache, bool force =
   // sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
 
   // Draw the circle only during a new moon
+  drawMoonPhaseGraphic(sprSmall, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
   if (moonPhase < 0.02 || moonPhase > 0.98) {
     sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
-  }
-  drawMoonPhaseGraphic(sprSmall, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
+  }  
 
   pushSpriteAndDelete(sprSmall, x, y);
 }
@@ -1851,36 +1876,42 @@ void drawFocusTimerWidget(int x, int y, int w, int h, String& cache, bool force 
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
+void drawHomeWidget(HomeWidgetType type, int x, int y, int w, int h, String& cache, bool force = false) {
+  switch (type) {
+    case HOME_WIDGET_WEEK:
+      drawMetricSprite(x, y, w, h, "Week", weekNumberText(), cache, force);
+      break;
+    case HOME_WIDGET_TIMER:
+      drawFocusTimerWidget(x, y, w, h, cache, force);
+      break;
+    case HOME_WIDGET_RAIN_COMBINED:
+      drawRainCombinedWidget(x, y, w, h, cache, force);
+      break;
+    case HOME_WIDGET_OUTDOOR:
+      drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempValue(), tempUnit(), cache, force, tempRangeText());
+      break;
+    case HOME_WIDGET_UV:
+      drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), "", cache, force, uvLevelText());
+      break;
+    case HOME_WIDGET_WIND:
+      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windSpeed(), windUnit(), cache, force, windDirectionText());
+      break;
+    case HOME_WIDGET_SUN:
+      drawSunEventWidget(x, y, w, h, cache, force);
+      break;
+    case HOME_WIDGET_NEXT_SUN:
+      drawWeatherStyleMetricSprite(x, y, w, h, nextSunLabel(), nextSunTimeTime(nextSunTimeText()), nextSunTimeAmPm(nextSunTimeText()), cache, force, preSunEvent());
+      break;
+    case HOME_WIDGET_MOON:
+      drawMoonPhaseWidget(x, y, w, h, cache, force);
+      break;
+  }
+}
+
 void drawHomeSlotWidget(int slot, bool force = false) {
   int x, y, w, h;
   getHomeSlotRect(slot, x, y, w, h);
-
-  switch (homeWidgetSlots[slot]) {
-    case HOME_WIDGET_WEEK:
-      drawMetricSprite(x, y, w, h, "Week", weekNumberText(), cacheHomeSlots[slot], force);
-      break;
-    case HOME_WIDGET_TIMER:
-      drawFocusTimerWidget(x, y, w, h, cacheHomeSlots[slot], force);
-      break;
-    case HOME_WIDGET_RAIN_COMBINED:
-      drawRainCombinedWidget(x, y, w, h, cacheHomeSlots[slot], force);
-      break;
-    case HOME_WIDGET_OUTDOOR:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempText(), "", cacheHomeSlots[slot], force, tempRangeText());
-      break;
-    case HOME_WIDGET_UV:
-      drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), "", cacheHomeSlots[slot], force, uvLevelText());
-      break;
-    case HOME_WIDGET_WIND:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windSpeed(), windUnit(), cacheHomeSlots[slot], force, windDirectionText());
-      break;
-    case HOME_WIDGET_SUN:
-      drawSunEventWidget(x, y, w, h, cacheHomeSlots[slot], force);
-      break;
-    case HOME_WIDGET_MOON:
-      drawMoonPhaseWidget(x, y, w, h, cacheHomeSlots[slot], force);
-      break;
-  }
+  drawHomeWidget(homeWidgetSlots[slot], x, y, w, h, cacheHomeSlots[slot], force);
 }
 
 void drawFocusMenuOverlay(bool force = false) {
@@ -2032,109 +2063,18 @@ void drawWeatherPageFull() {
   pageDirty = false;
   lastDrawnPage = PAGE_WEATHER;
 
-  lastTempText = "";
-  cacheWeatherRain = "";
-  lastUvText = "";
-  lastUvLevelText = "";
-  lastMoonText = "";
-  lastMoonLevelText = "";
-  lastWindText = "";
-  lastWindDirText = "";
-  lastNextSunLabel = "";
-  lastNextSunTime = "";
+  for (int i = 0; i < 6; i++) {
+    cacheWeatherWidgets[i] = "";
+  }
 }
 
 void updateWeatherDynamic() {
-  String t = tempText();
-  String tr = tempRangeText();
-  String tempCombined = t + "|" + tr;
-  if (tempCombined != lastTempText) {
-    tft.fillRect(18, PAGE_ROW1_Y + 30, 88, 30, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("Outdoor", 18, PAGE_ROW1_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(t, 18, PAGE_ROW1_Y + 30, 4);
-    tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(tr, 18, PAGE_ROW1_Y + 54, 1);
-    lastTempText = tempCombined;
-  }
-
-  drawRainCombinedWidget(124, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherRain);
-
-  String u = uvText();
-  String ul = uvLevelText();
-  if (u != lastUvText || ul != lastUvLevelText || dataDirty) {
-    tft.fillRect(18, PAGE_ROW2_Y + 30, 88, 30, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("UV index", 18, PAGE_ROW2_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(u, 18, PAGE_ROW2_Y + 28, 4);
-    tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(ul, 18, PAGE_ROW2_Y + 52, 1);
-    lastUvText = u;
-    lastUvLevelText = ul;
-  }
-
-  String w = windText();
-  String wd = windDirectionText();
-  if (w != lastWindText || wd != lastWindDirText) {
-    tft.fillRect(134, PAGE_ROW2_Y + 30, 88, 30, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("Wind", 134, PAGE_ROW2_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(w, 134, PAGE_ROW2_Y + 28, 4);
-    tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(wd, 134, PAGE_ROW2_Y + 52, 1);
-    lastWindText = w;
-    lastWindDirText = wd;
-  }
-
-  String nl = nextSunLabel();
-  String nt = nextSunTimeText();
-  if (nl != lastNextSunLabel || nt != lastNextSunTime) {
-    tft.fillRect(18, PAGE_ROW3_Y + 24, 88, 30, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString(nl, 18, PAGE_ROW3_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    if (useUsRegionFormat()) {
-      int splitAt = nt.lastIndexOf(' ');
-      String sunMain = splitAt > 0 ? nt.substring(0, splitAt) : nt;
-      String sunSuffix = splitAt > 0 ? nt.substring(splitAt + 1) : "";
-      tft.drawString(sunMain, 18, PAGE_ROW3_Y + 26, 4);
-      if (sunSuffix.length() > 0) {
-        int suffixX = 18 + tft.textWidth(sunMain, 4) + 3;
-        tft.drawString(sunSuffix, suffixX, PAGE_ROW3_Y + 31, 2);
-      }
-    } else {
-      tft.drawString(nt, 18, PAGE_ROW3_Y + 26, 4);
-    }
-    lastNextSunLabel = nl;
-    lastNextSunTime = nt;
-  }
-
-  String mv = moonPhaseText();
-  String ml = moonPhaseLabelText();
-  if (mv != lastMoonText || ml != lastMoonLevelText || dataDirty) {
-    tft.fillRect(126, PAGE_ROW3_Y + 6, 104, PAGE_WIDGET_H - 12, COL_PANEL);
-    tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("Moon", 134, PAGE_ROW3_Y + 8, 2);
-    tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(mv, 134, PAGE_ROW3_Y + 28, 4);
-    tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(ml, 134, PAGE_ROW3_Y + 52, 1);
-
-    const int iconCx = 210 - 5;
-    const int iconCy = PAGE_ROW3_Y + PAGE_WIDGET_H / 2 - 7;
-    const int iconR = 16;
-    drawMoonPhaseGraphic(tft, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
-
-    if (moonPhase < 0.02 || moonPhase > 0.98) {
-      sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
-    }
-
-    lastMoonText = mv;
-    lastMoonLevelText = ml;
-  }
+  drawHomeWidget(HOME_WIDGET_OUTDOOR, 8, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[0]);
+  drawHomeWidget(HOME_WIDGET_RAIN_COMBINED, 124, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[1]);
+  drawHomeWidget(HOME_WIDGET_UV, 8, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[2]);
+  drawHomeWidget(HOME_WIDGET_WIND, 124, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[3]);
+  drawHomeWidget(HOME_WIDGET_NEXT_SUN, 8, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[4]);
+  drawHomeWidget(HOME_WIDGET_MOON, 124, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[5]);
 }
 
 void radarDrawGrid() {
@@ -2827,14 +2767,9 @@ void handleSave() {
     cacheHomeSlots[i] = "";
   }
 
-  lastTempText = "";
-  cacheWeatherRain = "";
-  lastMoonText = "";
-  lastMoonLevelText = "";
-  lastWindText = "";
-  lastWindDirText = "";
-  lastNextSunLabel = "";
-  lastNextSunTime = "";
+  for (int i = 0; i < 6; i++) {
+    cacheWeatherWidgets[i] = "";
+  }
   lastUptimeText = "";
 
   if (locationChanged || unitsChanged) resetDataCaches();
