@@ -1,12 +1,5 @@
 // Deskbuddy V.8
-// Nav: Home / Weather / Notes / Status
-// Full version
-// - KP dots replaced with Low / Medium / High / Extreme text
-// - KP level text uses same small font as wind direction and stays inside the box
-// - Wind + direction added to Weather page
-// - Wind direction uses Accent color
-// - Weather sun event field automatically shows Sunrise or Sunset, whichever is next
-// - Uptime added to Status page
+// Port for the Freenove ESP32 Display 3.2" FNK0114L_3P2
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -500,7 +493,7 @@ const int BL_FULL = 230;
 const int BL_DIM  = 18;
 const int BL_OFF  = 0;
 const int FLASH_BL_LOW = 20;
-const int FLASH_BL_HIGH = 255;
+const int FLASH_BL_HIGH = 200;
 
 void wakeDisplay(bool clearManualMode = true);
 
@@ -602,13 +595,13 @@ static String formatMinuteOfDay(int minOfDay) {
 }
 
 static String tempText() {
-  if (isnan(tempC)) return unitKey == "imperial" ? "--.-F" : "--.-C";
-  return String(tempC, 1) + (unitKey == "imperial" ? "F" : "C");
+  if (isnan(tempC)) return unitKey == "imperial" ? "-- F" : "-- C";
+  return String((int)round(tempC)) + (unitKey == "imperial" ? "° F" : "° C");
 }
 
 static String formatDisplayTemp(float value) {
   if (isnan(value)) return "--";
-  return String((int)roundf(value)) + (unitKey == "imperial" ? "F" : "C");
+  return String((int)roundf(value));
 }
 
 static String tempRangeText() {
@@ -625,9 +618,17 @@ static String rainForecastText() {
   return unitKey == "imperial" ? String(precipForecastMm, 2) + "in" : String(precipForecastMm, 1) + "mm";
 }
 
+static String windSpeed() {
+  if (isnan(windSpeedMs)) return "--.-";
+  return String(windSpeedMs, 1);
+}
+
+static String windUnit() {
+  return unitKey == "imperial" ? "mph" : "m/s";
+}
+
 static String windText() {
-  if (isnan(windSpeedMs)) return unitKey == "imperial" ? "--.-mph" : "--.-m/s";
-  return unitKey == "imperial" ? String(windSpeedMs, 1) + "mph" : String(windSpeedMs, 1) + "m/s";
+  return windSpeed() + windUnit();
 }
 
 static String windDirectionText() {
@@ -635,7 +636,7 @@ static String windDirectionText() {
 
   const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   int idx = (int)roundf(windDirectionDeg / 45.0f) % 8;
-  return String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + "deg";
+  return String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + " deg";
 }
 
 static String uvText() {
@@ -1599,18 +1600,33 @@ void drawClockCardSprite(bool force = false) {
 
   sprClock.setTextDatum(TL_DATUM);
 
-  sprClock.setTextColor(COL_TEXT, COL_PANEL);
+  String clockCore = timeBuf;
+  String clockSuffix = "";
   if (useUsRegionFormat()) {
     int splitAt = timeBuf.lastIndexOf(' ');
-    String clockMain = splitAt > 0 ? timeBuf.substring(0, splitAt) : timeBuf;
-    String clockSuffix = splitAt > 0 ? timeBuf.substring(splitAt + 1) : "";
-    sprClock.drawString(clockMain, 10, 11, 4);
-    if (clockSuffix.length() > 0) {
-      int suffixX = 10 + sprClock.textWidth(clockMain, 4) + 4;
-      sprClock.drawString(clockSuffix, suffixX, 18, 2);
+    if (splitAt > 0) {
+      clockCore = timeBuf.substring(0, splitAt);
+      clockSuffix = timeBuf.substring(splitAt + 1);
     }
-  } else {
-    sprClock.drawString(timeBuf, 10, 11, 4);
+  }
+
+  int secondColon = clockCore.indexOf(':', clockCore.indexOf(':') + 1);
+  String clockMain = secondColon > 0 ? clockCore.substring(0, secondColon) : clockCore;
+  String seconds = secondColon > 0 ? clockCore.substring(secondColon + 1) : "";
+  int clockX = 10;
+
+  sprClock.setTextColor(COL_ACCENT, COL_PANEL);
+  sprClock.drawString(clockMain, clockX, 12, 4);
+  clockX += sprClock.textWidth(clockMain, 4) + 3;
+
+  sprClock.setTextColor(COL_TEXT, COL_PANEL);
+  if (seconds.length() > 0) {
+    String secondsPart = seconds + " ";
+    sprClock.drawString(secondsPart, clockX, 18, 2);
+    clockX += sprClock.textWidth(secondsPart, 2) + 4;
+  }
+  if (clockSuffix.length() > 0) {
+    sprClock.drawString(clockSuffix, clockX, 18, 2);
   }
 
   sprClock.setTextColor(COL_DIM, COL_PANEL);
@@ -1649,9 +1665,15 @@ void drawMetricSprite(int x, int y, int w, int h, const char* label, const Strin
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
-void drawWeatherStyleMetricSprite(int x, int y, int w, int h, const char* label, const String& value, String& cache, bool force = false, const String& detail = "") {
-  String combined = String(label) + "|" + value + "|" + detail + "|" + String(COL_PANEL) + "|" +
-                    String(COL_STROKE) + "|" + String(COL_TEXT);
+void drawWeatherStyleMetricSprite(int x, int y, int w, int h,
+                                  const char* label,
+                                  const String& value,
+                                  const String& subtext,
+                                  String& cache,
+                                  bool force = false,
+                                  const String& detail = "") {
+  String combined = String(label) + "|" + value + "|" + detail + "|" + subtext + "|" +
+                    String(COL_PANEL) + "|" + String(COL_STROKE) + "|" + String(COL_TEXT);
 
   if (!force && combined == cache) return;
   cache = combined;
@@ -1662,9 +1684,18 @@ void drawWeatherStyleMetricSprite(int x, int y, int w, int h, const char* label,
   sprSmall.setTextColor(COL_DIM, COL_PANEL);
   sprSmall.drawString(label, 10, 8, 2);
 
+  // Main value
   sprSmall.setTextColor(COL_TEXT, COL_PANEL);
   sprSmall.drawString(value, 10, 28, 4);
 
+  // Small subtext immediately after the main value
+  if (subtext.length() > 0) {
+    int subtextX = 10 + sprSmall.textWidth(value, 4) + 6;
+    sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+    sprSmall.drawString(subtext, subtextX, 36, 2);
+  }
+
+  // Existing detail area — unchanged
   if (detail.length() > 0) {
     sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
     sprSmall.drawString(detail, 10, 52, 1);
@@ -1758,11 +1789,16 @@ void drawMoonPhaseWidget(int x, int y, int w, int h, String& cache, bool force =
   sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
   sprSmall.drawString(detail, 10, 54, 1);
 
-  const int iconCx = w - 22;
-  const int iconCy = h / 2;
+  const int iconCx = w - 29;
+  const int iconCy = h / 2 - 7;
   const int iconR = 16;
+  // sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
+
+  // Draw the circle only during a new moon
+  if (moonPhase < 0.02 || moonPhase > 0.98) {
+    sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
+  }
   drawMoonPhaseGraphic(sprSmall, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
-  sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
 
   pushSpriteAndDelete(sprSmall, x, y);
 }
@@ -1830,13 +1866,13 @@ void drawHomeSlotWidget(int slot, bool force = false) {
       drawRainCombinedWidget(x, y, w, h, cacheHomeSlots[slot], force);
       break;
     case HOME_WIDGET_OUTDOOR:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempText(), cacheHomeSlots[slot], force, tempRangeText());
+      drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempText(), "", cacheHomeSlots[slot], force, tempRangeText());
       break;
     case HOME_WIDGET_UV:
-      drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), cacheHomeSlots[slot], force, uvLevelText());
+      drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), "", cacheHomeSlots[slot], force, uvLevelText());
       break;
     case HOME_WIDGET_WIND:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windText(), cacheHomeSlots[slot], force, windDirectionText());
+      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windSpeed(), windUnit(), cacheHomeSlots[slot], force, windDirectionText());
       break;
     case HOME_WIDGET_SUN:
       drawSunEventWidget(x, y, w, h, cacheHomeSlots[slot], force);
@@ -2087,11 +2123,14 @@ void updateWeatherDynamic() {
     tft.setTextColor(COL_ACCENT, COL_PANEL);
     tft.drawString(ml, 134, PAGE_ROW3_Y + 52, 1);
 
-    const int iconCx = 210;
-    const int iconCy = PAGE_ROW3_Y + PAGE_WIDGET_H / 2;
+    const int iconCx = 210 - 5;
+    const int iconCy = PAGE_ROW3_Y + PAGE_WIDGET_H / 2 - 7;
     const int iconR = 16;
     drawMoonPhaseGraphic(tft, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
-    tft.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
+
+    if (moonPhase < 0.02 || moonPhase > 0.98) {
+      sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
+    }
 
     lastMoonText = mv;
     lastMoonLevelText = ml;
