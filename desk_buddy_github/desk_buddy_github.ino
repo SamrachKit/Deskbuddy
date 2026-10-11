@@ -143,6 +143,13 @@ SemaphoreHandle_t radarDataMutex = nullptr;
 volatile bool radarFetchInProgress = false;
 volatile bool radarDataLoaded = false;
 
+String selectedRadarCallsign = "";
+String selectedRadarAltText = "";
+
+bool radarInfoVisible = false;
+uint8_t radarInfoRefreshes = 0;
+
+
 String buddyNickname = "";
 
 enum HomeWidgetType {
@@ -2150,6 +2157,8 @@ void drawWeatherPageFull() {
   }
 }
 
+// WEATHER PAGE
+
 void updateWeatherDynamic() {
   drawHomeWidget(HOME_WIDGET_OUTDOOR, 8, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[0]);
   drawHomeWidget(HOME_WIDGET_RAIN_COMBINED, 124, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[1]);
@@ -2159,10 +2168,12 @@ void updateWeatherDynamic() {
   drawHomeWidget(HOME_WIDGET_MOON, 124, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[5]);
 }
 
+// RADAR PAGE
+
 void radarDrawGrid() {
   const int cx = RADAR_CX, cy = RADAR_CY, r = RADAR_OUTER_R;
 
-  tft.fillCircle(cx, cy, r, TFT_BLACK);
+  tft.fillCircle(cx, cy, r+15, TFT_BLACK);
   for (int i = 1; i <= RADAR_RING_COUNT; i++) {
     tft.drawCircle(cx, cy, (r * i) / RADAR_RING_COUNT, COL_STROKE);
   }
@@ -2247,6 +2258,7 @@ void radarRenderFrame() {
   radarDrawGrid();
   radarDrawAircraft();
   radarDrawLoadedIndicator();
+  radarDrawSelectedAircraftInfo();
 }
 
 void drawRadarPageFull() {
@@ -2269,10 +2281,49 @@ void updateRadarDynamic() {
   }
 
   if (radarDirty) {
+    // Clear the selected aircraft info after two refreshes.
+    if (radarInfoVisible && radarInfoRefreshes == 0) {
+      radarInfoVisible = false;
+      selectedRadarCallsign = "";
+      selectedRadarAltText = "";
+    }
+
     radarRenderFrame();
     radarDirty = false;
+
+    if (radarInfoVisible && radarInfoRefreshes > 0) {
+      radarInfoRefreshes--;
+    }
   }
 }
+
+void radarDrawSelectedAircraftInfo() {
+  const int x = 4;
+  const int y = 40;
+
+  tft.fillRect(x - 2, y - 2, 90, 28, COL_BG);
+
+  if (!radarInfoVisible) return;  
+
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COL_ACCENT, COL_BG);
+
+  String title = selectedRadarCallsign.length() > 0
+                     ? selectedRadarCallsign
+                     : "Aircraft";
+
+  tft.drawString(title, x, y, 2);
+
+  tft.setTextColor(COL_TEXT, COL_BG);
+
+  if (selectedRadarAltText.length() > 0) {
+    tft.drawString(selectedRadarAltText, x, y + 16, 1);
+  }
+
+  tft.setTextDatum(TL_DATUM);
+}
+
+// STATUS PAGE
 
 void drawStatusPageFull() {
   tft.fillScreen(COL_BG);
@@ -2387,6 +2438,10 @@ void updateCurrentPageDynamic() {
   }
 }
 
+// =========================================================
+// NAVIGATION
+// =========================================================
+
 bool handleFocusMenuTouch(int x, int y) {
   if (!focusMenuOpen) return false;
 
@@ -2484,23 +2539,68 @@ bool handleStatusTouch(int x, int y) {
 }
 
 bool handleRadarTouch(int x, int y) {
+  if (y > SCREEN_H - NAV_H) return false;
+
   if (currentPage != PAGE_RADAR) return false;
 
+  // Check whether an airplane was touched.
+  bool aircraftTouched = false;
+
+  xSemaphoreTake(radarDataMutex, portMAX_DELAY);
+
+  for (int i = 0; i < radarAircraftCount; i++) {
+    RadarAircraft &a = radarAircraft[i];
+
+    int planeX, planeY;
+    radarLatLonToXY(a.lat, a.lon, planeX, planeY);
+
+    int dx = x - planeX;
+    int dy = y - planeY;
+
+    // Allow a 12-pixel touch radius around the airplane.
+    if (dx * dx + dy * dy <= 12 * 12) {
+      selectedRadarCallsign = a.callsign;
+      selectedRadarAltText = a.altText;
+
+      radarInfoVisible = true;
+      radarInfoRefreshes = 2;
+
+      aircraftTouched = true;
+      break;
+    }
+  }
+
+  xSemaphoreGive(radarDataMutex);
+
+  if (aircraftTouched) {
+    radarDirty = true;
+    pageDirty = true;
+    return true;
+  }
+
+  // Preserve the existing radar range touch behavior.
   int dx = x - RADAR_CX;
   int dy = y - RADAR_CY;
-  if (dx * dx + dy * dy > RADAR_OUTER_R * RADAR_OUTER_R) return false;
 
-  radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_COUNT;
-  prefs.putUChar("radarRange", (uint8_t)radarRangeIndex);
+  // Ignore touches inside or on the radar boundary.
+  if (dx * dx + dy * dy <=
+      RADAR_OUTER_R * RADAR_OUTER_R) {
+    return false;
+  }
+
+  radarRangeIndex =
+      (radarRangeIndex + 1) % RADAR_RANGE_COUNT;
+
+  prefs.putUChar("radarRange",
+                 (uint8_t)radarRangeIndex);
+
   lastRadarFetch = 0;
   radarDataLoaded = false;
   pageDirty = true;
+
   return true;
 }
 
-// =========================================================
-// NAVIGATION
-// =========================================================
 void handleNavTouch(int x, int y) {
   if (y < SCREEN_H - NAV_H) return;
 
