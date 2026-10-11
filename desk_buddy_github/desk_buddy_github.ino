@@ -39,7 +39,7 @@ void setWifiEnabled(bool enabled);
 // =========================================================
 TFT_eSPI tft;
 
-const int ROT = 2;
+const int ROT = 0;
 
 // =========================================================
 // WEB / STORAGE
@@ -2073,7 +2073,7 @@ void updateWeatherDynamic() {
   drawHomeWidget(HOME_WIDGET_RAIN_COMBINED, 124, PAGE_ROW1_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[1]);
   drawHomeWidget(HOME_WIDGET_UV, 8, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[2]);
   drawHomeWidget(HOME_WIDGET_WIND, 124, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[3]);
-  drawHomeWidget(HOME_WIDGET_NEXT_SUN, 8, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[4]);
+  drawHomeWidget(HOME_WIDGET_SUN, 8, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[4]);
   drawHomeWidget(HOME_WIDGET_MOON, 124, PAGE_ROW3_Y, 108, PAGE_WIDGET_H, cacheWeatherWidgets[5]);
 }
 
@@ -2874,7 +2874,8 @@ void setup() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Booting SAKI Deskbuddy...", 10, 10, 2);
 
-  uint16_t calData[5] = { 294, 3501, 440, 3457, 0 };
+  // uint16_t calData[5] = { 294, 3501, 440, 3457, 0 };  // ROT 2
+  uint16_t calData[5] = { 255, 3555, 422, 3515, 6 };  // ROT 0
   tft.setTouch(calData);
 
   radarDataMutex = xSemaphoreCreateMutex();
