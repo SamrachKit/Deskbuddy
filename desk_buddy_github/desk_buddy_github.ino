@@ -119,6 +119,10 @@ struct RadarAircraft {
   float trackDeg;
   bool hasTrack;
   String callsign;
+  String altitude;
+  String groundSpeed;
+  String aircraftType;
+  String ownerOperator;
   String altText;
 };
 
@@ -144,7 +148,8 @@ volatile bool radarFetchInProgress = false;
 volatile bool radarDataLoaded = false;
 
 String selectedRadarCallsign = "";
-String selectedRadarAltText = "";
+String selectedRadarAltText1 = "";
+String selectedRadarAltText2 = "";
 
 bool radarInfoVisible = false;
 uint8_t radarInfoRefreshes = 0;
@@ -1367,13 +1372,17 @@ bool fetchRadarAircraft() {
   String body;
   if (!httpsGetBody(url, body, 8000)) return false;
 
+  // https://www.adsbexchange.com/api/aircraft/v2/docs/index.html?url=/api/aircraft/v2/docs/openapi.json#tag/Geospatial-Filtering/operation/GetApiAircraftV2LatLonDist
   JsonDocument filter;
-  filter["ac"][0]["lat"] = true;
-  filter["ac"][0]["lon"] = true;
-  filter["ac"][0]["track"] = true;
-  filter["ac"][0]["flight"] = true;
-  filter["ac"][0]["hex"] = true;
-  filter["ac"][0]["alt_baro"] = true;
+  filter["ac"][0]["lat"] = true;        // Latitude of the aircraft
+  filter["ac"][0]["lon"] = true;        // Longitude of the aircraft
+  filter["ac"][0]["track"] = true;      // Aircraft track over the ground in degrees
+  filter["ac"][0]["gs"] = true;         // Ground speed in knots
+  filter["ac"][0]["flight"] = true;     // Flight callsign
+  filter["ac"][0]["hex"] = true;        // ICAO identifier
+  filter["ac"][0]["alt_baro"] = true;   // Barometric altitude in feet
+  filter["ac"][0]["t"] = true;          // Aircraft type code
+  filter["ac"][0]["ownOp"] = true;      // Owner/operator, if provided
 
   JsonDocument doc;
   if (deserializeJson(doc, body, DeserializationOption::Filter(filter))) return false;
@@ -1399,9 +1408,22 @@ bool fetchRadarAircraft() {
       if (callsign.length() == 0) callsign = plane["hex"] | "";
       a.callsign = callsign;
 
-      a.altText = plane["alt_baro"].is<float>()
+      a.altitude = plane["alt_baro"].is<float>()
         ? String((int)plane["alt_baro"].as<float>()) + "ft"
         : "";
+      a.altText = a.altitude;
+
+      a.groundSpeed = plane["gs"].is<float>()
+        ? String((int)plane["gs"].as<float>()) + "kt"
+        : "";
+
+      String aircraftType = plane["t"] | "";
+      aircraftType.trim();
+      a.aircraftType = aircraftType;
+
+      String ownerOperator = plane["ownOp"] | "";
+      ownerOperator.trim();
+      a.ownerOperator = ownerOperator;
 
       radarAircraftCount++;
     }
@@ -2285,7 +2307,9 @@ void updateRadarDynamic() {
     if (radarInfoVisible && radarInfoRefreshes == 0) {
       radarInfoVisible = false;
       selectedRadarCallsign = "";
-      selectedRadarAltText = "";
+      selectedRadarAltText1 = "";
+      selectedRadarAltText2 = "";
+      pageDirty = true;
     }
 
     radarRenderFrame();
@@ -2301,23 +2325,27 @@ void radarDrawSelectedAircraftInfo() {
   const int x = 4;
   const int y = 40;
 
-  tft.fillRect(x - 2, y - 2, 90, 28, COL_BG);
+  // tft.fillRect(x - 2, y - 2, 90, 28, COL_PANEL);
+  // tft.fillRect(x - 2, y - 2 + 16, 90, 20, COL_PANEL);
 
-  if (!radarInfoVisible) return;  
+  String title = "";
+  if (radarInfoVisible) 
+  {
+      title = selectedRadarCallsign.length() > 0
+            ? selectedRadarCallsign
+            : "Aircraft";
+  }
 
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(COL_ACCENT, COL_BG);
-
-  String title = selectedRadarCallsign.length() > 0
-                     ? selectedRadarCallsign
-                     : "Aircraft";
 
   tft.drawString(title, x, y, 2);
 
   tft.setTextColor(COL_TEXT, COL_BG);
 
-  if (selectedRadarAltText.length() > 0) {
-    tft.drawString(selectedRadarAltText, x, y + 16, 1);
+  if (selectedRadarAltText1.length() > 0) {
+    tft.drawString(selectedRadarAltText1, x, y + 16, 1);
+    tft.drawString(selectedRadarAltText2, x, y + 26, 1);
   }
 
   tft.setTextDatum(TL_DATUM);
@@ -2540,7 +2568,6 @@ bool handleStatusTouch(int x, int y) {
 
 bool handleRadarTouch(int x, int y) {
   if (y > SCREEN_H - NAV_H) return false;
-
   if (currentPage != PAGE_RADAR) return false;
 
   // Check whether an airplane was touched.
@@ -2560,7 +2587,9 @@ bool handleRadarTouch(int x, int y) {
     // Allow a 12-pixel touch radius around the airplane.
     if (dx * dx + dy * dy <= 12 * 12) {
       selectedRadarCallsign = a.callsign;
-      selectedRadarAltText = a.altText;
+
+      selectedRadarAltText1 = a.aircraftType + " " + a.altitude + " " + a.groundSpeed;
+      selectedRadarAltText2 = a.ownerOperator;
 
       radarInfoVisible = true;
       radarInfoRefreshes = 2;
@@ -2583,16 +2612,17 @@ bool handleRadarTouch(int x, int y) {
   int dy = y - RADAR_CY;
 
   // Ignore touches inside or on the radar boundary.
-  if (dx * dx + dy * dy <=
-      RADAR_OUTER_R * RADAR_OUTER_R) {
+  int touch_r = RADAR_OUTER_R + 5;
+  if (dx * dx + dy * dy <= touch_r * touch_r) {
     return false;
   }
 
-  radarRangeIndex =
-      (radarRangeIndex + 1) % RADAR_RANGE_COUNT;
+  // Ignore touches that is not in the forth quadrant.
+  if (x < RADAR_CX || y < RADAR_CY) {
+    return false;
+  }
 
-  prefs.putUChar("radarRange",
-                 (uint8_t)radarRangeIndex);
+  radarRangeIndex = (radarRangeIndex + 1) % RADAR_RANGE_COUNT;
 
   lastRadarFetch = 0;
   radarDataLoaded = false;
