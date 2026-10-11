@@ -1554,31 +1554,43 @@ static void drawWeatherIcon(TFT_eSprite& display, int cx, int cy, int code, bool
 // Renders the moon disc from the API phase fraction (0 = new, 0.5 = full).
 template <typename Display>
 void drawMoonPhaseGraphic(Display& spr, int cx, int cy, int r, float phase, uint16_t litColor, uint16_t darkColor) {
-  if (isnan(phase)) phase = 0.5f;
+  if (isnan(phase))
+    phase = 0.5f;
+
   phase = constrain(phase, 0.0f, 1.0f);
   if (phase == 0.0f || phase == 1.0f) {
     spr.fillCircle(cx, cy, r, darkColor);
-    return;
   }
-  float terminatorScale = cosf(6.28318530718f * phase);
-  bool waxing = phase < 0.5f;
+  else
+  {
+    float terminatorScale = cosf(6.28318530718f * phase);
+    bool waxing = phase < 0.5f;
 
-  for (int dy = -r; dy <= r; dy++) {
-    int rowR = (int)lroundf(sqrtf((float)(r * r - dy * dy)));
-    if (rowR <= 0) continue;
-    int termX = (int)lroundf(rowR * terminatorScale * (waxing ? 1.0f : -1.0f));
+    for (int dy = -r; dy <= r; dy++) {
+      int rowR = (int)lroundf(sqrtf((float)(r * r - dy * dy)));
+      if (rowR <= 0) continue;
+      int termX = (int)lroundf(rowR * terminatorScale * (waxing ? 1.0f : -1.0f));
 
-    if (waxing) {
-      int darkW = termX + rowR;
-      if (darkW > 0) spr.drawFastHLine(cx - rowR, cy + dy, darkW, darkColor);
-      int litW = rowR - termX + 1;
-      if (litW > 0) spr.drawFastHLine(cx + termX, cy + dy, litW, litColor);
-    } else {
-      int litW = termX + rowR + 1;
-      if (litW > 0) spr.drawFastHLine(cx - rowR, cy + dy, litW, litColor);
-      int darkW = rowR - termX;
-      if (darkW > 0) spr.drawFastHLine(cx + termX + 1, cy + dy, darkW, darkColor);
+      if (waxing) {
+        int darkW = termX + rowR;
+        if (darkW > 0)
+          spr.drawFastHLine(cx - rowR, cy + dy, darkW, darkColor);
+        int litW = rowR - termX + 1;
+        if (litW > 0) spr.drawFastHLine(cx + termX, cy + dy, litW, litColor);
+      } else {
+        int litW = termX + rowR + 1;
+        if (litW > 0)
+          spr.drawFastHLine(cx - rowR, cy + dy, litW, litColor);
+        int darkW = rowR - termX;
+        if (darkW > 0)
+          spr.drawFastHLine(cx + termX + 1, cy + dy, darkW, darkColor);
+      }
     }
+  }
+
+  // Draw the circle only during a new moon
+  if (phase < 0.02 || phase > 0.98) {
+    sprSmall.drawCircle(cx, cy, r+1, COL_STROKE);
   }
 }
 
@@ -1812,26 +1824,26 @@ void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = 
 }
 
 void drawWindWidget(int x, int y, int w, int h, String& cache, bool force = false) {
-               
+
   String label = "Wind";
   String value;
   String detail;
   String subtext = unitKey == "imperial" ? "mph" : "m/s";
 
-  if (isnan(windSpeedMs)) 
+  if (isnan(windSpeedMs))
     value = "--.-";
-  else 
+  else
     value = String(windSpeedMs, 1);
-  
+
   if (isnan(windDirectionDeg))
     detail = "--";
   else
   {
     const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
     int idx = (int)roundf(windDirectionDeg / 45.0f) % 8;
-    detail = String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + " deg";  
+    detail = String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + " deg";
   }
-               
+
   String combined = String(label) + "|" + value + "|" + detail + "|" + subtext + "|" +
                     String(COL_PANEL) + "|" + String(COL_STROKE) + "|" + String(COL_TEXT);
 
@@ -1855,7 +1867,6 @@ void drawWindWidget(int x, int y, int w, int h, String& cache, bool force = fals
     sprSmall.drawString(subtext, subtextX, 36, 2);
   }
 
-  // Existing detail area — unchanged
   if (detail.length() > 0) {
     sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
     sprSmall.drawString(detail, 10, 52, 1);
@@ -1894,13 +1905,7 @@ void drawMoonPhaseWidget(int x, int y, int w, int h, String& cache, bool force =
   const int iconCx = w - 29;
   const int iconCy = h / 2 - 7;
   const int iconR = 16;
-  // sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
-
-  // Draw the circle only during a new moon
   drawMoonPhaseGraphic(sprSmall, iconCx, iconCy, iconR, moonPhase, COL_TEXT, COL_PANEL);
-  if (moonPhase < 0.02 || moonPhase > 0.98) {
-    sprSmall.drawCircle(iconCx, iconCy, iconR, COL_STROKE);
-  }  
 
   pushSpriteAndDelete(sprSmall, x, y);
 }
