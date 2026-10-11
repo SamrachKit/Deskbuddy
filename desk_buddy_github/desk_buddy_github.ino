@@ -663,23 +663,6 @@ static String rainForecastText() {
   return unitKey == "imperial" ? String(precipForecastMm, 2) + "in" : String(precipForecastMm, 1) + "mm";
 }
 
-static String windSpeed() {
-  if (isnan(windSpeedMs)) return "--.-";
-  return String(windSpeedMs, 1);
-}
-
-static String windUnit() {
-  return unitKey == "imperial" ? "mph" : "m/s";
-}
-
-static String windDirectionText() {
-  if (isnan(windDirectionDeg)) return "--";
-
-  const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-  int idx = (int)roundf(windDirectionDeg / 45.0f) % 8;
-  return String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + " deg";
-}
-
 static String uvText() {
   return isnan(uvIndex) ? "UV --" : "UV " + String(uvIndex, 1);
 }
@@ -1599,6 +1582,41 @@ void drawMoonPhaseGraphic(Display& spr, int cx, int cy, int r, float phase, uint
   }
 }
 
+// Draws a wind direction arrow.
+// directionDeg: 0 = North, 90 = East, 180 = South, 270 = West.
+template <typename Display>
+void drawWindArrow(Display& spr, int cx, int cy, int length,
+                   float directionDeg, uint16_t color) {
+  // Add 180 degrees to reverse the direction (e.g., East becomes West)
+  const float angle = (directionDeg + 180.0f) * DEG_TO_RAD;
+  const int halfLength = length / 2;
+
+  // Arrow tip
+  int tipX = cx + (int)lroundf(halfLength * sinf(angle));
+  int tipY = cy - (int)lroundf(halfLength * cosf(angle));
+
+  // Arrow base
+  int baseX = cx - (int)lroundf(halfLength * sinf(angle));
+  int baseY = cy + (int)lroundf(halfLength * cosf(angle));
+
+  // Arrow shaft
+  spr.drawLine(baseX, baseY, tipX, tipY, color);
+
+  // Arrowhead dimensions
+  const int headLength = max(4, length / 3);
+  const float headAngle = 0.6f;
+
+  // Arrowhead endpoints
+  int leftX = tipX - (int)lroundf(headLength * sinf(angle - headAngle));
+  int leftY = tipY + (int)lroundf(headLength * cosf(angle - headAngle));
+
+  int rightX = tipX - (int)lroundf(headLength * sinf(angle + headAngle));
+  int rightY = tipY + (int)lroundf(headLength * cosf(angle + headAngle));
+
+  spr.drawLine(tipX, tipY, leftX, leftY, color);
+  spr.drawLine(tipX, tipY, rightX, rightY, color);
+}
+
 // =========================================================
 // HOME SPRITES
 // =========================================================
@@ -1793,6 +1811,65 @@ void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = 
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
+void drawWindWidget(int x, int y, int w, int h, String& cache, bool force = false) {
+               
+  String label = "Wind";
+  String value;
+  String detail;
+  String subtext = unitKey == "imperial" ? "mph" : "m/s";
+
+  if (isnan(windSpeedMs)) 
+    value = "--.-";
+  else 
+    value = String(windSpeedMs, 1);
+  
+  if (isnan(windDirectionDeg))
+    detail = "--";
+  else
+  {
+    const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    int idx = (int)roundf(windDirectionDeg / 45.0f) % 8;
+    detail = String(dirs[idx]) + " " + String((int)roundf(windDirectionDeg)) + " deg";  
+  }
+               
+  String combined = String(label) + "|" + value + "|" + detail + "|" + subtext + "|" +
+                    String(COL_PANEL) + "|" + String(COL_STROKE) + "|" + String(COL_TEXT);
+
+  if (!force && combined == cache) return;
+  cache = combined;
+
+  makeSpriteCard(sprSmall, w, h, true);
+
+  sprSmall.setTextDatum(TL_DATUM);
+  sprSmall.setTextColor(COL_DIM, COL_PANEL);
+  sprSmall.drawString(label, 10, 8, 2);
+
+  // Main value
+  sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+  sprSmall.drawString(value, 10, 28, 4);
+
+  // Small subtext immediately after the main value
+  if (subtext.length() > 0) {
+    int subtextX = 10 + sprSmall.textWidth(value, 4) + 6;
+    sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+    sprSmall.drawString(subtext, subtextX, 36, 2);
+  }
+
+  // Existing detail area — unchanged
+  if (detail.length() > 0) {
+    sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
+    sprSmall.drawString(detail, 10, 52, 1);
+  }
+
+  const int arrowCx = w - 25;
+  const int arrowCy = h / 2 - 15;
+  const int arrowR = 16;
+
+  if (!isnan(windDirectionDeg)) drawWindArrow(sprSmall, arrowCx, arrowCy, arrowR, windDirectionDeg, TFT_WHITE);
+
+  pushSpriteAndDelete(sprSmall, x, y);
+}
+
 void drawMoonPhaseWidget(int x, int y, int w, int h, String& cache, bool force = false) {
   String value = moonPhaseText();
   String detail = moonPhaseLabelText();
@@ -1894,7 +1971,7 @@ void drawHomeWidget(HomeWidgetType type, int x, int y, int w, int h, String& cac
       drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), "", cache, force, uvLevelText());
       break;
     case HOME_WIDGET_WIND:
-      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windSpeed(), windUnit(), cache, force, windDirectionText());
+      drawWindWidget(x, y, w, h, cache, force);
       break;
     case HOME_WIDGET_SUN:
       drawSunEventWidget(x, y, w, h, cache, force);
