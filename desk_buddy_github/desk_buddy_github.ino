@@ -22,6 +22,8 @@
 // FORWARD DECLARATIONS
 // =========================================================
 void setBacklight(int value);
+void applyDisplayBrightness();
+void updateAutoDimBrightness();
 void setWifiEnabled(bool enabled);
 
 // =========================================================
@@ -440,6 +442,7 @@ bool timerDoneDialogOpen = false;
 unsigned long timerDoneDialogStartedMs = 0;
 const unsigned long TIMER_DONE_DIALOG_MS = 60UL * 1000UL;
 bool flashModeEnabled = false;
+bool autoDimEnabled = false;
 int timerPresetMin[6] = {1, 5, 10, 15, 25, 30};
 bool wifiEnabled = true;
 bool wifiConnectInProgress = false;
@@ -489,8 +492,9 @@ static time_t lastSyncTime = 0;
 const int BACKLIGHT_PIN = 27;
 
 bool sleepDimmed = false;
-bool sleepOff = false;
+volatile bool sleepOff = false;
 bool manualDimMode = false;
+bool autoDimCurrentlyActive = false;
 
 unsigned long lastInteractionMs = 0;
 
@@ -902,7 +906,7 @@ void dismissTimerDoneDialog() {
   cacheTimerDone = "";
   cacheTimerDoneCountdown = "";
   cacheTimerDoneFlash = "";
-  if (!sleepDimmed && !sleepOff) setBacklight(BL_FULL);
+  applyDisplayBrightness();
   pageDirty = true;
 }
 
@@ -951,26 +955,48 @@ void setBacklight(int value) {
   analogWrite(BACKLIGHT_PIN, value);
 }
 
+void applyDisplayBrightness() {
+  if (sleepOff) {
+    setBacklight(BL_OFF);
+  } else if (sleepDimmed || manualDimMode || autoDimCurrentlyActive) {
+    setBacklight(BL_DIM);
+  } else {
+    setBacklight(BL_FULL);
+  }
+}
+
+void updateAutoDimBrightness() {
+  int nowMin = minutesNowLocal();
+  bool shouldDim = autoDimEnabled &&
+                   sunriseMin >= 0 &&
+                   sunsetMin >= 0 &&
+                   (nowMin >= sunsetMin || nowMin < sunriseMin);
+  if (shouldDim == autoDimCurrentlyActive) return;
+
+  autoDimCurrentlyActive = shouldDim;
+  if (!timerDoneDialogOpen) applyDisplayBrightness();
+}
+
 void wakeDisplay(bool clearManualMode) {
   sleepDimmed = false;
   sleepOff = false;
   if (clearManualMode) manualDimMode = false;
   lastInteractionMs = millis();
-  setBacklight(BL_FULL);
+  applyDisplayBrightness();
   pageDirty = true;
 }
 
 void enterSleepDim() {
   if (sleepDimmed || sleepOff || manualDimMode) return;
   sleepDimmed = true;
-  setBacklight(BL_DIM);
+  applyDisplayBrightness();
 }
 
 void enterSleepOff() {
   if (sleepOff) return;
   sleepOff = true;
   sleepDimmed = true;
-  setBacklight(BL_OFF);
+  applyDisplayBrightness();
   pageDirty = true;
 }
 
@@ -983,7 +1009,7 @@ void toggleSleepMode() {
   manualDimMode = true;
   sleepDimmed = true;
   sleepOff = false;
-  setBacklight(BL_DIM);
+  applyDisplayBrightness();
   pageDirty = true;
 }
 
@@ -1099,6 +1125,7 @@ void loadStoredSettings() {
   regionFormatKey  = prefs.getString("region", regionFormatKey);
   timezoneKey      = sanitizeTimezoneKey(prefs.getString("tz", timezoneKey));
   flashModeEnabled = prefs.getBool("flashMode", false);
+  autoDimEnabled   = prefs.getBool("autoDim", false);
   wifiEnabled      = prefs.getBool("wifiEnabled", true);
 
   for (int i = 0; i < HOME_SLOT_COUNT; i++) {
@@ -1177,6 +1204,10 @@ bool touchNewPress(int& tx, int& ty) {
 // API
 // =========================================================
 bool httpsGetBody(const String &url, String &outBody, unsigned long timeoutMs = 0) {
+  if (sleepOff) return false;
+
+  Serial.println("Fetching: " + url);
+
   WiFiClientSecure client;
   client.setInsecure();
 
@@ -1196,7 +1227,7 @@ bool httpsGetBody(const String &url, String &outBody, unsigned long timeoutMs = 
 }
 
 bool fetchSunriseSunset() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (sleepOff || WiFi.status() != WL_CONNECTED) return false;
 
   String url = String("https://api.sunrise-sunset.org/json?lat=") + String(LAT, 4) +
                "&lng=" + String(LNG, 4) + "&formatted=0";
@@ -1249,6 +1280,8 @@ bool fetchSunriseSunset() {
 }
 
 void ensureSunTimesForToday() {
+  if (sleepOff) return;
+
   time_t nowT = time(nullptr);
   int ymd = ymdFromLocal(nowT);
 
@@ -1259,7 +1292,7 @@ void ensureSunTimesForToday() {
 }
 
 bool fetchWeather() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (sleepOff || WiFi.status() != WL_CONNECTED) return false;
 
   String windUnitParam = unitKey == "imperial" ? "mph" : "ms";
   String tempUnitParam = unitKey == "imperial" ? "fahrenheit" : "celsius";
@@ -1329,6 +1362,8 @@ bool fetchWeather() {
 }
 
 void ensureWeather() {
+  if (sleepOff) return;
+
   time_t nowT = time(nullptr);
   if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(precipForecastMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) || isnan(moonPhase) || weatherCode < 0 || weatherIsDay < 0 ||
        (nowT - lastWeatherFetch) > WEATHER_INTERVAL_SEC) &&
@@ -1362,7 +1397,7 @@ void radarLatLonToXY(float lat, float lon, int &outX, int &outY) {
 }
 
 bool fetchRadarAircraft() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (sleepOff || WiFi.status() != WL_CONNECTED) return false;
 
   float rangeNm = RADAR_RANGES[radarRangeIndex].km / 1.852f;
 
@@ -2296,7 +2331,7 @@ void drawRadarPageFull() {
 }
 
 void updateRadarDynamic() {
-  if (!radarFetchInProgress && WiFi.status() == WL_CONNECTED &&
+  if (!sleepOff && !radarFetchInProgress && WiFi.status() == WL_CONNECTED &&
       millis() - lastRadarFetch >= RADAR_FETCH_INTERVAL_MS) {
     radarFetchInProgress = true;
     xTaskCreatePinnedToCore(radarFetchTaskFn, "radarFetch", 16384, nullptr, 1, nullptr, 0);
@@ -2661,6 +2696,7 @@ void handleRoot() {
   String tz     = timezoneKey;
   String nickname = buddyNickname;
   bool flashMode = flashModeEnabled;
+  bool autoDim = autoDimEnabled;
   String homeSlotKeys[HOME_SLOT_COUNT];
   for (int i = 0; i < HOME_SLOT_COUNT; i++) {
     homeSlotKeys[i] = prefs.getString((String("homeSlot") + String(i)).c_str(), homeWidgetKey(homeWidgetSlots[i]));
@@ -2802,6 +2838,10 @@ void handleRoot() {
   page += "<div><label class='label'>Time zone</label><select name='tz'>";
   appendTimezoneOptions(page, tz);
   page += "</select></div>";
+  page += "<div><label class='label'>Auto Dim</label><select name='autoDim'>";
+  page += "<option value='on'" + String(autoDim==1 ?" selected":"") + ">On</option>";
+  page += "<option value='off'" + String(autoDim==0 ?" selected":"") + ">Off</option>";
+  page += "</select><div class='muted' style='margin-top:8px;'>Dims the screen from sunset to sunrise.</div></div>";
   page += "</div>";
   page += "</div>";
   page += "<div class='settings-block'><span class='settings-title'>Timer</span><div class='settings-desc'>Choose the six quick timers shown in the popup menu.</div><div class='timer-slot-grid'>";
@@ -2907,6 +2947,7 @@ void handleSave() {
   int newSleepMin = server.hasArg("sleepMin") ? server.arg("sleepMin").toInt() : sleepIntervalMin;
   sleepIntervalMin = constrain(newSleepMin, 0, 120);
   bool newFlashMode = server.hasArg("flashMode");
+  bool newAutoDim = server.hasArg("autoDim") && server.arg("autoDim") == "on";
 
   bool locationChanged =
     (fabsf(newLat - LAT) > 0.0001f) ||
@@ -2914,6 +2955,7 @@ void handleSave() {
     (newLoc != locationName);
 
   bool unitsChanged = newUnits != unitKey;
+  bool timezoneChanged = newTz != timezoneKey;
 
   buddyNickname = newNickname;
   locationName = newLoc;
@@ -2926,6 +2968,7 @@ void handleSave() {
   regionFormatKey = newRegion;
   timezoneKey = newTz;
   flashModeEnabled = newFlashMode;
+  autoDimEnabled = newAutoDim;
   for (int i = 0; i < HOME_SLOT_COUNT; i++) {
     homeWidgetSlots[i] = newHomeSlots[i];
   }
@@ -2950,6 +2993,7 @@ void handleSave() {
   prefs.putFloat("lng", LNG);
   prefs.putInt("sleepMin", sleepIntervalMin);
   prefs.putBool("flashMode", flashModeEnabled);
+  prefs.putBool("autoDim", autoDimEnabled);
   for (int i = 0; i < HOME_SLOT_COUNT; i++) {
     String key = String("homeSlot") + String(i);
     prefs.putString(key.c_str(), homeWidgetKey(homeWidgetSlots[i]));
@@ -2962,7 +3006,6 @@ void handleSave() {
   applyThemeByKey(accentKey, bgKey);
   applyTextColorByKey(textColorKey);
   applyDeviceTimezoneByKey(timezoneKey);
-  if (!sleepDimmed && !sleepOff) setBacklight(BL_FULL);
 
   lastRadarFetch = 0;
   radarDataLoaded = false;
@@ -2984,7 +3027,8 @@ void handleSave() {
   }
   lastUptimeText = "";
 
-  if (locationChanged || unitsChanged) resetDataCaches();
+  if (locationChanged || unitsChanged || timezoneChanged) resetDataCaches();
+  updateAutoDimBrightness();
 
   server.sendHeader("Location", "/");
   server.send(303);
@@ -3041,6 +3085,7 @@ void updateWiFiConnectionState() {
   if (status == WL_CONNECTED) {
     wifiConnectInProgress = false;
     ensureSunTimesForToday();
+    updateAutoDimBrightness();
     ensureWeather();
     dataDirty = true;
     pageDirty = true;
@@ -3101,6 +3146,7 @@ void setup() {
   waitForNtpTime();
 
   ensureSunTimesForToday();
+  updateAutoDimBrightness();
   ensureWeather();
 
   setupWebServer();
@@ -3123,6 +3169,7 @@ void loop() {
   updateWiFiConnectionState();
   updateFocusTimerState();
   updateTimerDoneDialogState();
+  updateAutoDimBrightness();
   handleAutoSleep();
 
   int tx = 0, ty = 0;
